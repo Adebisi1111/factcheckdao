@@ -1,4 +1,4 @@
-# { "Depends": "py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng" }
+# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 
 """
 FactCheckDAO — crowd-sourced article fact-checking via GenLayer AI consensus.
@@ -11,7 +11,7 @@ PURPOSE
     no single point of failure.
 
 CONSENSUS MODEL
-    Single gl.nondet.web.render + gl.nondet.exec_prompt per validator inside
+    Single gl.nondet.web.request + gl.nondet.exec_prompt per validator inside
     gl.vm.run_nondet. Each validator fetches independently, judges
     independently, and votes. Majority (>50%) wins, otherwise UNDETERMINED.
 
@@ -20,40 +20,37 @@ GL.MESSAGE.VALUE USAGE
     Studio Next / Bradbury payable issue until the network supports it.
 
 STATE
-    articles     TreeMap[str, Article]  — keyed by article_id (hex)
+    articles     TreeMap[str, Article]  — keyed by article_id (str)
     verdicts     TreeMap[str, Verdict]  — article_id → final verdict
-    next_id      u256                   — global counter
+    next_id      u256                    — global counter
 """
 
 import json
 from datetime import datetime, timezone
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
-import genlayer as gl
-from genlayer import u256
-from genlayer.storage import DynArray, TreeMap
-from genlayer.storage import allow as allow_storage
+from genlayer import *
 
 
 # ---------------------------------------------------------------------------
 # Storage model
 # ---------------------------------------------------------------------------
 
+
 @allow_storage
 @dataclass
 class Article:
     """A submitted article pending or resolved."""
 
-    article_id: str = ""
-    url: str = ""
-    submitter: str = ""
-    submitted_at: u256 = u256(0)
+    article_id: str
+    url: str
+    submitter: str
+    submitted_at: u256
     # PENDING -> majority verdict -> RESOLVED ; UNDETERMINED -> stays PENDING
-    status: str = "PENDING"
+    status: str
     # Number of consensus rounds this article has gone through.
-    # Bounded so the committee size does not grow with stale resubmits.
-    resolve_count: u256 = u256(0)
+    resolve_count: u256
 
 
 @allow_storage
@@ -61,32 +58,21 @@ class Article:
 class Verdict:
     """Stored verdict for an article, once the committee agreed."""
 
-    article_id: str = ""
-    verdict: str = ""
-    article_excerpt: str = ""
+    article_id: str
+    verdict: str
+    article_excerpt: str
     # Claims are stored as a JSON-encoded string; clients parse on read.
-    # Avoids DynArray in the dataclass, which the storage decorator cannot instantiate.
-    claims_json: str = "[]"
-    resolved_at: u256 = u256(0)
-    resolver: str = ""
-
-
-# ---------------------------------------------------------------------------
-# Trusted sources
-# ---------------------------------------------------------------------------
-
-# Canonical list of trusted sources the LLM uses to cross-reference claims.
-# This is intentionally small and concrete (high-trust fact-checking feeds).
-# A submitter may only claim support against these feeds; arbitrary URLs are
-# rejected — this is a definition of "what counts as evidence", not a shortcut.
-# TRUSTED_FEEDS_DEFAULT: removed (list built in __init__)
+    claims_json: str
+    resolved_at: u256
+    resolver: str
 
 
 # ---------------------------------------------------------------------------
 # The contract
 # ---------------------------------------------------------------------------
 
-class FactCheckDAO(gl.contract.Contract):
+
+class FactCheckDAO(gl.Contract):
     """Crowd-sourced article fact-checking with AI-powered consensus."""
 
     TRUSTED_FEEDS: DynArray[str]
@@ -98,7 +84,6 @@ class FactCheckDAO(gl.contract.Contract):
     def __init__(self):
         self.next_id = u256(0)
         # Storage containers are initialized as fields accessed in declared order.
-        # Assign self.* once here; Schema generates storage slots.
         self.TRUSTED_FEEDS.append("https://www.reuters.com/fact-check/")
         self.TRUSTED_FEEDS.append("https://www.snopes.com/")
         self.TRUSTED_FEEDS.append("https://www.politifact.com/factchecks/")
@@ -136,8 +121,6 @@ class FactCheckDAO(gl.contract.Contract):
         Each validator fetches the article and asks the LLM whether the
         article's claims are supported by the trusted feeds. Majority verdict
         wins; a split committee leaves the article PENDING.
-
-        Bounded: an article may only be resolved once (immutable after RESOLVED).
         """
         sender = str(gl.message.sender_address)
         article = self.articles.get(article_id, None)
@@ -160,7 +143,6 @@ class FactCheckDAO(gl.contract.Contract):
             if not isinstance(leader_res, gl.vm.Return):
                 return False
             mine = self._verify_article(url, trusted)
-            # We only accept the verdict when it matches ours; otherwise mismatch.
             return mine.get("verdict") == leader_res.calldata.get("verdict")
 
         result = gl.vm.run_nondet(leader_fn, validator_fn)
@@ -176,7 +158,6 @@ class FactCheckDAO(gl.contract.Contract):
             resolved_at=self._now(),
             resolver=sender,
         )
-        # Persist claims as JSON; DynArray in dataclass defeats storage decorator
         self.verdicts[article_id].claims_json = json.dumps(result.get("claims", []))
         article.status = "RESOLVED"
         self.articles[article_id] = article
@@ -190,21 +171,17 @@ class FactCheckDAO(gl.contract.Contract):
     def _verify_article(self, url: str, trusted_feeds: list) -> dict:
         """Fetch the article, extract claims, cross-reference against trusted feeds."""
         response = gl.nondet.web.request(url, method="GET")
-        # Response.body is bytes; decode to str before feeding the LLM
         body = response.body if hasattr(response, "body") else (response.get("body", "") if isinstance(response, dict) else str(response))
         article_text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else str(body)
-        article_text = article_text[:5000]  # bounded context for LLM
+        article_text = article_text[:5000]
 
-        # ---- Cross-reference setup -----------------------------------------
         feed_list = "\n".join(f"- {f}" for f in trusted_feeds)
-                # ---- Extract claims -----------------------------------------------
         claims_prompt = (
             "ExtractClaims: between 1 and 5 verifiable factual claims from the article below. "
             "Return ONLY a JSON array of strings, no extra text.\n\n"
             f"Article:\n{article_text}"
         )
         raw_claims = gl.nondet.exec_prompt(claims_prompt).strip()
-        # One claim per line; strip list-syntax wrappers, keep non-empty lines.
         lines = [l.strip().lstrip("-*0123456789. ") for l in raw_claims.splitlines()]
         claims = [l[:200] for l in lines if l][:5]
         if not claims:
@@ -225,7 +202,7 @@ class FactCheckDAO(gl.contract.Contract):
                 break
         else:
             verdict = "INSUFFICIENT"
-        excerpt = verdict_raw[ :300 ]
+        excerpt = verdict_raw[:300]
 
         return {
             "verdict": verdict,
@@ -302,8 +279,6 @@ class FactCheckDAO(gl.contract.Contract):
     # ------------------------------------------------------------------
 
     def _now(self) -> u256:
-        # GenVM pins the Python clock to the transaction timestamp, so every
-        # validator observes the same value.
         return u256(int(datetime.now(timezone.utc).timestamp()))
 
     def _now_iso(self) -> str:
