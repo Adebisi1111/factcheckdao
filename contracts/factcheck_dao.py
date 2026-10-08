@@ -5,27 +5,29 @@ FactCheckDAO — crowd-sourced article fact-checking via GenLayer AI consensus.
 
 PURPOSE
     Any submitter posts an article URL. A committee of AI validators fetches
-    the article, extracts its factual claims, cross-references each against a
-    declared trusted feed list, and votes SUPPORTED / REFUTED / INSUFFICIENT.
-    A verdict is stored only if the validators reach majority agreement —
-    no single point of failure.
+    the article, extracts its factual claims, cross-references each against
+    authoritative sources (Wikipedia, Britannica, NASA, scientific journals),
+    and votes SUPPORTED / REFUTED / INSUFFICIENT.
+    A verdict is stored only if the validators reach majority agreement.
 
 CONSENSUS MODEL
-    Single gl.nondet.web.request + gl.nondet.exec_prompt per validator inside
-    gl.vm.run_nondet. Each validator fetches independently, judges
-    independently, and votes. Majority (>50%) wins, otherwise UNDETERMINED.
+    gl.vm.run_nondet with leader/validator pattern. Each validator independently
+    fetches the article, extracts claims, and asks the LLM to verify them
+    against authoritative sources. Majority (>50%) wins.
 
-GL.MESSAGE.VALUE USAGE
-    None. This contract never holds GEN and never sends GEN, avoiding the
-    Studio Next / Bradbury payable issue until the network supports it.
+VERDICT LOGIC
+    SUPPORTED  — LLM confirms claims are true based on authoritative sources
+    REFUTED    — LLM finds claims are false or contradicted by sources
+    INSUFFICIENT — LLM cannot verify (sources don't cover the claims)
 
 STATE
     articles     TreeMap[str, Article]  — keyed by article_id (str)
-    verdicts     TreeMap[str, Verdict]  — article_id → final verdict
+    verdicts     TreeMap[str, Verdict]  — article_id → final verdict + reasoning
     next_id      u256                    — global counter
 """
 
 import json
+import re
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any
@@ -60,11 +62,12 @@ class Verdict:
 
     article_id: str
     verdict: str
-    article_excerpt: str
+    reasoning: str
     # Claims are stored as a JSON-encoded string; clients parse on read.
     claims_json: str
     resolved_at: u256
     resolver: str
+
 
 # ---------------------------------------------------------------------------
 # The contract
@@ -74,7 +77,8 @@ class Verdict:
 class FactCheckDAO(gl.Contract):
     """Crowd-sourced article fact-checking with AI-powered consensus."""
 
-    TRUSTED_FEEDS: DynArray[str]
+    # Authoritative sources that corroborate factual claims.
+    TRUSTED_SOURCES: DynArray[str]
 
     articles: TreeMap[str, Article]
     verdicts: TreeMap[str, Verdict]
@@ -82,12 +86,11 @@ class FactCheckDAO(gl.Contract):
 
     def __init__(self):
         self.next_id = u256(0)
-        # Storage containers are initialized as fields accessed in declared order.
-        self.TRUSTED_FEEDS.append("https://www.reuters.com/fact-check/")
-        self.TRUSTED_FEEDS.append("https://www.snopes.com/")
-        self.TRUSTED_FEEDS.append("https://www.politifact.com/factchecks/")
-        self.TRUSTED_FEEDS.append("https://apnews.com/hub/ap-fact-check")
-        self.TRUSTED_FEEDS.append("https://www.factcheck.org/")
+        self.TRUSTED_SOURCES.append("https://en.wikipedia.org/wiki/Main_Page")
+        self.TRUSTED_SOURCES.append("https://www.britannica.com/")
+        self.TRUSTED_SOURCES.append("https://www.nasa.gov/")
+        self.TRUSTED_SOURCES.append("https://www.nature.com/")
+        self.TRUSTED_SOURCES.append("https://www.scientificamerican.com/")
 
     # ------------------------------------------------------------------
     # Submitters
@@ -115,12 +118,7 @@ class FactCheckDAO(gl.Contract):
 
     @gl.public.write
     def resolve_article(self, article_id: str) -> str:
-        """Trigger an AI consensus round on the article.
-
-        Each validator fetches the article and asks the LLM whether the
-        article's claims are supported by the trusted feeds. Majority verdict
-        wins; a split committee leaves the article PENDING.
-        """
+        """Trigger an AI consensus round on the article."""
         sender = str(gl.message.sender_address)
         article = self.articles.get(article_id, None)
         if article is None:
@@ -132,16 +130,16 @@ class FactCheckDAO(gl.Contract):
         self.articles[article_id] = article
 
         url = article.url
-        trusted = list(self.TRUSTED_FEEDS)
+        sources = list(self.TRUSTED_SOURCES)
 
         # ---- nondeterministic round --------------------------------------
         def leader_fn() -> dict:
-            return self._verify_article(url, trusted)
+            return self._verify_article(url, sources)
 
         def validator_fn(leader_res: Any) -> bool:
             if not isinstance(leader_res, gl.vm.Return):
                 return False
-            mine = self._verify_article(url, trusted)
+            mine = self._verify_article(url, sources)
             return mine.get("verdict") == leader_res.calldata.get("verdict")
 
         result = gl.vm.run_nondet(leader_fn, validator_fn)
@@ -149,13 +147,14 @@ class FactCheckDAO(gl.Contract):
         # run_nondet returns a gl.vm.Return wrapper; access .calldata for the actual dict
         result_data = result.calldata if hasattr(result, "calldata") else result
         verdict = result_data.get("verdict", "")
+        reasoning = result_data.get("reasoning", "")
         if verdict not in ("SUPPORTED", "REFUTED", "INSUFFICIENT"):
             raise gl.vm.UserError(f"Consensus produced invalid verdict: {verdict}")
 
         self.verdicts[article_id] = Verdict(
             article_id=article_id,
             verdict=verdict,
-            article_excerpt=result_data.get("article_excerpt", "")[:500],
+            reasoning=reasoning[:500],
             claims_json=json.dumps(result_data.get("claims", [])),
             resolved_at=self._now(),
             resolver=sender,
@@ -169,52 +168,123 @@ class FactCheckDAO(gl.Contract):
     # AI helpers (leader/validator shared)
     # ------------------------------------------------------------------
 
-    def _verify_article(self, url: str, trusted_feeds: list) -> dict:
-        """Fetch the article, extract claims, cross-reference against trusted feeds.
-        
-        NOTE: trusted_feeds must be passed in as a plain list built BEFORE run_nondet
-        so no storage read happens inside the nondet round.
-        """
+    def _verify_article(self, url: str, sources: list) -> dict:
+        """Fetch the article, extract claims, verify against authoritative sources."""
         response = gl.nondet.web.request(url, method="GET")
         body = response.body if hasattr(response, "body") else (response.get("body", "") if isinstance(response, dict) else str(response))
-        article_text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else str(body)
-        article_text = article_text[:5000]
+        raw_html = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else str(body)
 
-        feed_list = "\n".join(f"- {f}" for f in trusted_feeds)
+        # --- HTML Content Stripping ----------------------------------------
+        # Extract text between <p> and </p> tags — the main content blocks
+        paragraphs = re.findall(r'<p[^>]*>(.*?)</p>', raw_html, flags=re.DOTALL | re.IGNORECASE)
+        # Strip any remaining HTML tags from each paragraph
+        clean_paragraphs = []
+        for p in paragraphs:
+            # Remove script/style blocks
+            p = re.sub(r'<script[^>]*>.*?</script>', '', p, flags=re.DOTALL | re.IGNORECASE)
+            p = re.sub(r'<style[^>]*>.*?</style>', '', p, flags=re.DOTALL | re.IGNORECASE)
+            # Remove all remaining tags
+            p = re.sub(r'<[^>]+>', '', p)
+            # Decode HTML entities
+            p = p.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&quot;', '"').replace('&#39;', "'").replace('&nbsp;', ' ')
+            p = re.sub(r'\s+', ' ', p).strip()
+            if p:
+                clean_paragraphs.append(p)
+        article_text = ' '.join(clean_paragraphs)[:5000]
+
+        if not article_text:
+            # Fallback: strip all tags if no <p> tags found
+            text = re.sub(r'<script[^>]*>.*?</script>', '', raw_html, flags=re.DOTALL | re.IGNORECASE)
+            text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
+            text = re.sub(r'<[^>]+>', ' ', text)
+            text = re.sub(r'\s+', ' ', text).strip()
+            article_text = text[:5000]
+
+        source_list = "\n".join(f"- {s}" for s in sources)
+
+        # Step 1: Extract verifiable factual claims
         claims_prompt = (
-            "ExtractClaims: between 1 and 5 verifiable factual claims from the article below. "
-            "Return ONLY a JSON array of strings, no extra text.\n\n"
+            "Extract 1-5 verifiable factual claims from the article below. "
+            "A verifiable claim is a statement that can be confirmed or denied "
+            "by authoritative sources. Return ONLY a JSON array of strings, no extra text.\n\n"
             f"Article:\n{article_text}"
         )
         raw_claims = gl.nondet.exec_prompt(claims_prompt).strip()
-        lines = [l.strip().lstrip("-*0123456789. ") for l in raw_claims.splitlines()]
-        claims = [l[:200] for l in lines if l][:5]
+        claims = self._parse_claims(raw_claims)
         if not claims:
             claims = [article_text[:200]]
 
-        cross_prompt = (
-            "CrossReference: are the article's claims supported by any of the "
-            "trusted fact-checking sources?\n"
-            f"Trusted sources:\n{feed_list}\n\n"
-            f"Article claims:\n" + "\n".join(f"- {c}" for c in claims) + "\n\n"
-            "Respond ONLY with one of these three tokens:\n"
-            "SUPPORTED, REFUTED, INSUFFICIENT"
+        # Step 2: Verify claims — prompt mandates JSON output
+        verify_prompt = (
+            "Fact-check these claims against your knowledge (Wikipedia, Britannica, NASA).\n"
+            f"Claims: " + " | ".join(claims) + "\n"
+            "Return ONLY JSON: {\"verdict\":\"SUPPORTED|REFUTED|INSUFFICIENT\",\"reasoning\":\"brief reason\"}. "
+            "Default to INSUFFICIENT if unsure."
         )
-        verdict_raw = gl.nondet.exec_prompt(cross_prompt).strip().upper()
-        for v in ("SUPPORTED", "REFUTED", "INSUFFICIENT"):
-            if v in verdict_raw:
-                verdict = v
-                break
-        else:
-            verdict = "INSUFFICIENT"
-        excerpt = verdict_raw[:300]
+        raw_verdict = gl.nondet.exec_prompt(verify_prompt).strip()
+        parsed = self._parse_verdict_json(raw_verdict)
 
         return {
-            "verdict": verdict,
+            "verdict": parsed.get("verdict", "INSUFFICIENT"),
+            "reasoning": parsed.get("reasoning", ""),
             "claims": claims,
-            "article_excerpt": excerpt,
+            "article_excerpt": parsed.get("reasoning", "")[:300],
             "validator_reports": [],
         }
+
+    # ------------------------------------------------------------------
+    # Defensive JSON parsing helpers
+    # ------------------------------------------------------------------
+
+    def _parse_claims(self, raw: str) -> list:
+        """Parse LLM output into a list of claim strings."""
+        # Strip markdown code blocks
+        raw = re.sub(r'```json\s*', '', raw, flags=re.IGNORECASE)
+        raw = re.sub(r'```\s*', '', raw)
+        # Extract text between outermost curly braces
+        match = re.search(r'\{.*\}', raw, flags=re.DOTALL)
+        if match:
+            raw = match.group()
+        # Try to find a JSON array
+        try:
+            data = json.loads(raw)
+            if isinstance(data, list):
+                return [str(c)[:200] for c in data if c][:5]
+            if isinstance(data, dict) and "claims" in data:
+                return [str(c)[:200] for c in data["claims"] if c][:5]
+        except (json.JSONDecodeError, KeyError):
+            pass
+        # Fallback: parse line-by-line
+        lines = [l.strip().lstrip("-*0123456789. ") for l in raw.splitlines()]
+        return [l[:200] for l in lines if l][:5]
+
+    def _parse_verdict_json(self, raw: str) -> dict:
+        """Parse LLM verdict JSON output with defensive cleanup."""
+        # Strip markdown code blocks
+        raw = re.sub(r'```json\s*', '', raw, flags=re.IGNORECASE)
+        raw = re.sub(r'```\s*', '', raw)
+        # Extract text between outermost curly braces
+        match = re.search(r'\{.*\}', raw, flags=re.DOTALL)
+        if match:
+            raw = match.group()
+        # Try to parse
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                verdict = data.get("verdict", "INSUFFICIENT")
+                reasoning = data.get("reasoning", "")
+                if verdict not in ("SUPPORTED", "REFUTED", "INSUFFICIENT"):
+                    verdict = "INSUFFICIENT"
+                return {"verdict": verdict, "reasoning": reasoning}
+        except (json.JSONDecodeError, KeyError):
+            pass
+        # Fallback: search for verdict token in raw text
+        raw_upper = raw.upper()
+        for v in ("SUPPORTED", "REFUTED", "INSUFFICIENT"):
+            if v in raw_upper:
+                return {"verdict": v, "reasoning": raw[:300]}
+        # Ultimate fallback
+        return {"verdict": "INSUFFICIENT", "reasoning": "Could not parse LLM output"}
 
     # ------------------------------------------------------------------
     # Views
@@ -247,7 +317,7 @@ class FactCheckDAO(gl.Contract):
                 "exists": True,
                 "article_id": v.article_id,
                 "verdict": v.verdict,
-                "article_excerpt": v.article_excerpt,
+                "reasoning": v.reasoning,
                 "claims": json.loads(v.claims_json or "[]"),
                 "validator_reports": [],
                 "resolved_at": int(v.resolved_at),

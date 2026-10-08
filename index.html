@@ -76,7 +76,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 </div>
 
 <script>
-const CONTRACT = '0x44c34B56F862C9c075c0Ee5c8774b1b73d6a49Ef';
+const CONTRACT = '0xb005F5176b1D668d6AcF9d664D57C2476B2f1418';
 const RPC = 'https://rpc-bradbury.genlayer.com';
 const EXPLORER = 'https://explorer-bradbury.genlayer.com';
 
@@ -232,6 +232,7 @@ async function loadArticles() {
           verdictHtml = `
             <div style="margin-top:0.5rem;">
               <span class="verdict verdict-${verdict.verdict}">${verdict.verdict}</span>
+              ${verdict.reasoning ? `<p style="font-size:0.85rem;color:#aaa;margin-top:0.5rem;">${verdict.reasoning}</p>` : ''}
               ${claimsHtml}
             </div>`;
         }

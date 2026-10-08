@@ -5,7 +5,7 @@ A crowd-sourced news platform on GenLayer where submitted articles are automatic
 ## Deployed
 
 **Network:** GenLayer Bradbury Testnet (chain ID 4221)  
-**Contract address:** [`0xC3730a386478D8d14Af84C025c8997C86cb7c827`](https://explorer-bradbury.genlayer.com/address/0xC3730a386478D8d14Af84C025c8997C86cb7c827)
+**Contract address:** [`0xb005F5176b1D668d6AcF9d664D57C2476B2f1418`](https://explorer-bradbury.genlayer.com/address/0xb005F5176b1D668d6AcF9d664D57C2476B2f1418)
 
 ## What it does
 
@@ -28,9 +28,16 @@ This is exactly what GenLayer's Intelligent Contracts provide.
 
 ## Verified working on Bradbury
 
-- `submit_article("https://example.com/test")` → tx [`0x817d5609…`](https://explorer-bradbury.genlayer.com/tx/0x817d56096da91f55b0dbe2c577dcf32c38012d5c0e90f9609db635e9595dec5b)
-- `get_article("article-1")` returns `{"exists": true, "status": "PENDING", ...}`
-- `total_articles()` returns `1` after one submission
+- **Contract:** `0xb005F5176b1D668d6AcF9d664D57C2476B2f1418`
+- **Test article:** Wikipedia "Mars" page
+- **Verdict:** `SUPPORTED` — "All claims are consistent with authoritative sources (NASA, Britannica, Wikipedia). Mars is the 4th planet, mean diameter ~6779 km, has moons Phobos and Deimos, year ~687 Earth days, and Mariner 4 performed the first successful flyby in 1965."
+- **Claims extracted:**
+  - Mars is the fourth planet from the Sun.
+  - The mean diameter of Mars is 6,779 km (4,212 mi).
+  - Mars has two natural satellites: Phobos and Deimos.
+  - A Martian solar year is equal to 687 Earth days.
+  - The first successful flyby exploration of Mars was conducted in 1965 with Mariner 4.
+- **Consensus:** 4/5 validators agreed (1 timeout)
 
 ## Contract API
 
