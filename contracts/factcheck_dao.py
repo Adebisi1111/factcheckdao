@@ -66,7 +66,6 @@ class Verdict:
     resolved_at: u256
     resolver: str
 
-
 # ---------------------------------------------------------------------------
 # The contract
 # ---------------------------------------------------------------------------
@@ -147,18 +146,20 @@ class FactCheckDAO(gl.Contract):
 
         result = gl.vm.run_nondet(leader_fn, validator_fn)
 
-        verdict = result["verdict"]
+        # run_nondet returns a gl.vm.Return wrapper; access .calldata for the actual dict
+        result_data = result.calldata if hasattr(result, "calldata") else result
+        verdict = result_data.get("verdict", "")
         if verdict not in ("SUPPORTED", "REFUTED", "INSUFFICIENT"):
             raise gl.vm.UserError(f"Consensus produced invalid verdict: {verdict}")
 
         self.verdicts[article_id] = Verdict(
             article_id=article_id,
             verdict=verdict,
-            article_excerpt=result.get("article_excerpt", "")[:500],
+            article_excerpt=result_data.get("article_excerpt", "")[:500],
+            claims_json=json.dumps(result_data.get("claims", [])),
             resolved_at=self._now(),
             resolver=sender,
         )
-        self.verdicts[article_id].claims_json = json.dumps(result.get("claims", []))
         article.status = "RESOLVED"
         self.articles[article_id] = article
 
@@ -169,7 +170,11 @@ class FactCheckDAO(gl.Contract):
     # ------------------------------------------------------------------
 
     def _verify_article(self, url: str, trusted_feeds: list) -> dict:
-        """Fetch the article, extract claims, cross-reference against trusted feeds."""
+        """Fetch the article, extract claims, cross-reference against trusted feeds.
+        
+        NOTE: trusted_feeds must be passed in as a plain list built BEFORE run_nondet
+        so no storage read happens inside the nondet round.
+        """
         response = gl.nondet.web.request(url, method="GET")
         body = response.body if hasattr(response, "body") else (response.get("body", "") if isinstance(response, dict) else str(response))
         article_text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else str(body)
