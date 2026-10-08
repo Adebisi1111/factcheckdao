@@ -19,10 +19,12 @@ button:hover { opacity: 0.9; }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-secondary { background: #2a2a3a; }
 .btn-success { background: linear-gradient(135deg, #10b981, #059669); }
+.btn-warning { background: linear-gradient(135deg, #f59e0b, #d97706); }
 .status { padding: 0.75rem 1rem; border-radius: 8px; margin-top: 0.75rem; font-size: 0.9rem; }
 .status-success { background: #064e3b; color: #6ee7b7; }
 .status-error { background: #7f1d1d; color: #fca5a5; }
 .status-info { background: #1e3a5f; color: #93c5fd; }
+.status-warning { background: #78350f; color: #fcd34d; }
 .verdict { display: inline-block; padding: 0.25rem 0.75rem; border-radius: 9999px; font-size: 0.8rem; font-weight: 600; }
 .verdict-SUPPORTED { background: #064e3b; color: #6ee7b7; }
 .verdict-REFUTED { background: #7f1d1d; color: #fca5a5; }
@@ -36,6 +38,10 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .error-banner { background: #7f1d1d; color: #fca5a5; padding: 1rem; border-radius: 8px; margin-bottom: 1rem; }
 .connect-btn { margin-bottom: 1rem; }
 .hidden { display: none; }
+.spinner { display: inline-block; width: 1rem; height: 1rem; border: 2px solid #6366f1; border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 0.5rem; vertical-align: middle; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.progress-bar { height: 4px; background: #2a2a3a; border-radius: 2px; margin-top: 0.75rem; overflow: hidden; }
+.progress-bar-fill { height: 100%; background: linear-gradient(90deg, #6366f1, #8b5cf6); transition: width 0.5s ease; }
 </style>
 </head>
 <body>
@@ -67,9 +73,9 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
     <div class="card">
       <h2>Contract Info</h2>
       <p style="font-size:0.85rem;color:#888;">
-        Contract: <code style="color:#a5b4fc;">0x44c34B56F862C9c075c0Ee5c8774b1b73d6a49Ef</code><br>
+        Contract: <code style="color:#a5b4fc;">0xb005F5176b1D668d6AcF9d664D57C2476B2f1418</code><br>
         Network: Bradbury Testnet (4221)<br>
-        <a href="https://explorer-bradbury.genlayer.com/address/0x44c34B56F862C9c075c0Ee5c8774b1b73d6a49Ef" target="_blank" style="color:#6366f1;">View on Explorer →</a>
+        <a href="https://explorer-bradbury.genlayer.com/address/0xb005F5176b1D668d6AcF9d664D57C2476B2f1418" target="_blank" style="color:#6366f1;">View on Explorer →</a>
       </p>
     </div>
   </div>
@@ -81,6 +87,7 @@ const RPC = 'https://rpc-bradbury.genlayer.com';
 const EXPLORER = 'https://explorer-bradbury.genlayer.com';
 
 let wallet = null;
+let pollingInterval = null;
 
 // Function selectors
 const SELECTORS = {
@@ -99,10 +106,6 @@ function encodeString(str) {
   padded.set(encoded);
   const lenHex = encoded.length.toString(16).padStart(64, '0');
   return '0x' + lenHex + Array.from(padded).map(b => b.toString(16).padStart(2, '0')).join('');
-}
-
-function encodeAddress(addr) {
-  return '0x' + '0'.repeat(24) + addr.slice(2).toLowerCase();
 }
 
 async function rpc(method, params) {
@@ -135,14 +138,12 @@ async function connectWallet() {
       return;
     }
 
-    // Switch to Bradbury
     try {
       await window.ethereum.request({
         method: 'wallet_switchEthereumChain',
         params: [{ chainId: '0x107d' }],
       });
     } catch (switchError) {
-      // Chain not added, add it
       await window.ethereum.request({
         method: 'wallet_addEthereumChain',
         params: [{
@@ -173,7 +174,7 @@ async function submitArticle() {
 
   const btn = document.getElementById('submitBtn');
   btn.disabled = true;
-  document.getElementById('submitStatus').innerHTML = '<div class="status status-info">Submitting...</div>';
+  document.getElementById('submitStatus').innerHTML = '<div class="status status-info"><span class="spinner"></span>Submitting...</div>';
 
   try {
     const data = SELECTORS.submit_article + encodeString(url).slice(2);
@@ -186,7 +187,6 @@ async function submitArticle() {
     document.getElementById('submitStatus').innerHTML = `<div class="status status-success">Submitted! Tx: <a href="${EXPLORER}/tx/${hash}" target="_blank" style="color:#6ee7b7;">${hash.slice(0, 20)}...</a></div>`;
     document.getElementById('articleUrl').value = '';
     
-    // Wait a bit then reload
     setTimeout(loadArticles, 3000);
   } catch (e) {
     document.getElementById('submitStatus').innerHTML = `<div class="status status-error">${e.message}</div>`;
@@ -200,7 +200,6 @@ async function loadArticles() {
   list.innerHTML = '<div class="loading">Loading...</div>';
 
   try {
-    // Get total articles
     const totalHex = await rpc('eth_call', [{ to: CONTRACT, data: SELECTORS.total_articles }, 'latest']);
     const total = parseInt(totalHex, 16);
 
@@ -213,14 +212,14 @@ async function loadArticles() {
     for (let i = 1; i <= total; i++) {
       const id = `article-${i}`;
       
-      // Get article
       const articleHex = await rpc('eth_call', [{ to: CONTRACT, data: SELECTORS.get_article + encodeString(id).slice(2) }, 'latest']);
       const article = decodeJson(articleHex);
 
       if (!article.exists) continue;
 
-      // Get verdict if resolved
       let verdictHtml = '';
+      let actionHtml = '';
+
       if (article.status === 'RESOLVED') {
         const verdictHex = await rpc('eth_call', [{ to: CONTRACT, data: SELECTORS.get_verdict + encodeString(id).slice(2) }, 'latest']);
         const verdict = decodeJson(verdictHex);
@@ -236,6 +235,15 @@ async function loadArticles() {
               ${claimsHtml}
             </div>`;
         }
+      } else {
+        // Pending article — show resolve button
+        actionHtml = `
+          <div style="margin-top:0.75rem;">
+            <button class="btn-success" onclick="resolveArticle('${id}')" id="resolveBtn-${id}">
+              Run AI Verification
+            </button>
+          </div>
+          <div id="resolveStatus-${id}"></div>`;
       }
 
       html += `
@@ -246,6 +254,7 @@ async function loadArticles() {
             Submitted: ${new Date(article.submitted_at * 1000).toLocaleString()}
           </div>
           ${verdictHtml}
+          ${actionHtml}
         </div>`;
     }
 
@@ -253,6 +262,169 @@ async function loadArticles() {
   } catch (e) {
     list.innerHTML = `<div class="status status-error">Error: ${e.message}</div>`;
   }
+}
+
+// ============================================================
+// Resolve Article with Retry & Polling
+// ============================================================
+
+async function resolveArticle(articleId) {
+  const btn = document.getElementById(`resolveBtn-${articleId}`);
+  const statusDiv = document.getElementById(`resolveStatus-${articleId}`);
+  
+  btn.disabled = true;
+  statusDiv.innerHTML = `
+    <div class="status status-info" style="margin-top:0.75rem;">
+      <span class="spinner"></span>Verifying Article (This may take up to 45 seconds)...
+    </div>
+    <div class="progress-bar"><div class="progress-bar-fill" id="progress-${articleId}" style="width:0%"></div></div>
+  `;
+
+  // Animate progress bar
+  let progress = 0;
+  const progressInterval = setInterval(() => {
+    progress = Math.min(progress + 2, 90);
+    const bar = document.getElementById(`progress-${articleId}`);
+    if (bar) bar.style.width = progress + '%';
+  }, 1000);
+
+  try {
+    // Step 1: Submit resolve transaction
+    const data = SELECTORS.resolve_article + encodeString(articleId).slice(2);
+    const hash = await rpc('eth_sendTransaction', [{
+      from: wallet,
+      to: CONTRACT,
+      data: data,
+    }]);
+
+    // Step 2: Start polling for verdict
+    statusDiv.innerHTML = `
+      <div class="status status-info" style="margin-top:0.75rem;">
+        <span class="spinner"></span>Transaction submitted. Waiting for consensus...
+      </div>
+      <div class="progress-bar"><div class="progress-bar-fill" id="progress-${articleId}" style="width:50%"></div></div>
+    `;
+
+    // Poll every 5 seconds for up to 60 seconds
+    const maxPolls = 12;
+    let polls = 0;
+    let found = false;
+
+    while (polls < maxPolls && !found) {
+      await sleep(5000);
+      polls++;
+
+      try {
+        const verdictHex = await rpc('eth_call', [{ to: CONTRACT, data: SELECTORS.get_verdict + encodeString(articleId).slice(2) }, 'latest']);
+        const verdict = decodeJson(verdictHex);
+        
+        if (verdict.exists) {
+          found = true;
+          clearInterval(progressInterval);
+          
+          const claims = verdict.claims || [];
+          const claimsHtml = claims.length > 0 
+            ? `<ul class="claims">${claims.map(c => `<li>${c}</li>`).join('')}</ul>` 
+            : '';
+          
+          statusDiv.innerHTML = `
+            <div class="status status-success" style="margin-top:0.75rem;">
+              <span class="verdict verdict-${verdict.verdict}">${verdict.verdict}</span>
+              ${verdict.reasoning ? `<p style="font-size:0.85rem;color:#aaa;margin-top:0.5rem;">${verdict.reasoning}</p>` : ''}
+              ${claimsHtml}
+              <p style="font-size:0.8rem;color:#666;margin-top:0.5rem;">
+                Tx: <a href="${EXPLORER}/tx/${hash}" target="_blank" style="color:#6ee7b7;">${hash.slice(0, 20)}...</a>
+              </p>
+            </div>
+          `;
+          
+          // Refresh article status
+          setTimeout(loadArticles, 2000);
+        }
+      } catch (pollErr) {
+        // Ignore polling errors, keep trying
+      }
+
+      // Update progress
+      const bar = document.getElementById(`progress-${articleId}`);
+      if (bar) bar.style.width = Math.min(50 + polls * 5, 95) + '%';
+    }
+
+    // Step 3: If not found after 60s, show retry option
+    if (!found) {
+      clearInterval(progressInterval);
+      statusDiv.innerHTML = `
+        <div class="status status-warning" style="margin-top:0.75rem;">
+          <p>Network busy. The transaction may still be processing.</p>
+          <p style="font-size:0.8rem;color:#aaa;margin-top:0.5rem;">
+            Tx: <a href="${EXPLORER}/tx/${hash}" target="_blank" style="color:#fcd34d;">${hash.slice(0, 20)}...</a>
+          </p>
+          <button class="btn-warning" onclick="resolveArticle('${articleId}')" style="margin-top:0.75rem;">
+            Retry Verification
+          </button>
+          <button class="btn-secondary" onclick="loadArticles()" style="margin-top:0.5rem;margin-left:0.5rem;">
+            Check Status
+          </button>
+        </div>
+      `;
+    }
+
+  } catch (e) {
+    clearInterval(progressInterval);
+    
+    // Handle RPC timeout gracefully — check if it actually succeeded
+    if (e.message && (e.message.includes('timeout') || e.message.includes('LEADER_TIMEOUT'))) {
+      statusDiv.innerHTML = `
+        <div class="status status-info" style="margin-top:0.75rem;">
+          <span class="spinner"></span>Network timeout. Checking if verification succeeded...
+        </div>
+      `;
+      
+      // Wait 10s then check
+      await sleep(10000);
+      
+      try {
+        const verdictHex = await rpc('eth_call', [{ to: CONTRACT, data: SELECTORS.get_verdict + encodeString(articleId).slice(2) }, 'latest']);
+        const verdict = decodeJson(verdictHex);
+        
+        if (verdict.exists) {
+          const claims = verdict.claims || [];
+          const claimsHtml = claims.length > 0 
+            ? `<ul class="claims">${claims.map(c => `<li>${c}</li>`).join('')}</ul>` 
+            : '';
+          
+          statusDiv.innerHTML = `
+            <div class="status status-success" style="margin-top:0.75rem;">
+              <span class="verdict verdict-${verdict.verdict}">${verdict.verdict}</span>
+              ${verdict.reasoning ? `<p style="font-size:0.85rem;color:#aaa;margin-top:0.5rem;">${verdict.reasoning}</p>` : ''}
+              ${claimsHtml}
+            </div>
+          `;
+          setTimeout(loadArticles, 2000);
+          return;
+        }
+      } catch (checkErr) {
+        // Still not found
+      }
+      
+      // Show retry
+      statusDiv.innerHTML = `
+        <div class="status status-warning" style="margin-top:0.75rem;">
+          <p>Network busy. Please retry verification.</p>
+          <button class="btn-warning" onclick="resolveArticle('${articleId}')" style="margin-top:0.75rem;">
+            Retry Verification
+          </button>
+        </div>
+      `;
+    } else {
+      // Real error
+      statusDiv.innerHTML = `<div class="status status-error" style="margin-top:0.75rem;">${e.message}</div>`;
+    }
+  }
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function showError(msg) {
