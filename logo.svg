@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1"/>
+      <stop offset="100%" style="stop-color:#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="shield" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#1e1b4b"/>
+      <stop offset="100%" style="stop-color:#312e81"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="4" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  
+  <!-- Background circle -->
+  <circle cx="256" cy="256" r="240" fill="url(#bg)"/>
+  
+  <!-- Shield -->
+  <path d="M256 60 L400 120 L400 260 Q400 380 256 440 Q112 380 112 260 L112 120 Z" 
+        fill="url(#shield)" stroke="#a5b4fc" stroke-width="4"/>
+  
+  <!-- Checkmark -->
+  <path d="M180 260 L230 310 L340 200" 
+        fill="none" stroke="#10b981" stroke-width="24" 
+        stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)"/>
+  
+  <!-- AI Brain dots -->
+  <circle cx="256" cy="140" r="8" fill="#6366f1" opacity="0.8"/>
+  <circle cx="220" cy="160" r="6" fill="#8b5cf6" opacity="0.6"/>
+  <circle cx="292" cy="160" r="6" fill="#8b5cf6" opacity="0.6"/>
+  
+  <!-- Blockchain nodes -->
+  <circle cx="180" cy="380" r="10" fill="#6366f1" opacity="0.4"/>
+  <circle cx="256" cy="400" r="10" fill="#8b5cf6" opacity="0.4"/>
+  <circle cx="332" cy="380" r="10" fill="#6366f1" opacity="0.4"/>
+  <line x1="180" y1="380" x2="256" y2="400" stroke="#6366f1" stroke-width="2" opacity="0.3"/>
+  <line x1="256" y1="400" x2="332" y2="380" stroke="#8b5cf6" stroke-width="2" opacity="0.3"/>
+  
+  <!-- Text -->
+  <text x="256" y="470" text-anchor="middle" font-family="Arial, sans-serif" 
+        font-size="28" font-weight="bold" fill="white" opacity="0.9">FactCheckDAO</text>
+</svg>
