@@ -7,7 +7,7 @@
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0a0a0f; color: #e0e0e0; min-height: 100vh; }
-.container { max-width: 800px; margin: 0 auto; padding: 2rem; }
+.container { max-width: 820px; margin: 0 auto; padding: 2rem; }
 h1 { font-size: 2rem; margin-bottom: 0.5rem; background: linear-gradient(135deg, #6366f1, #8b5cf6); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
 .subtitle { color: #888; margin-bottom: 2rem; }
 .card { background: #14141f; border: 1px solid #2a2a3a; border-radius: 12px; padding: 1.5rem; margin-bottom: 1rem; }
@@ -34,6 +34,11 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .article-item .meta { color: #666; font-size: 0.8rem; margin-top: 0.5rem; }
 .claims { margin-top: 0.5rem; padding-left: 1.25rem; }
 .claims li { font-size: 0.85rem; color: #aaa; margin-bottom: 0.25rem; }
+.source { margin-top: 0.5rem; font-size: 0.8rem; color: #888; word-break: break-all; }
+.source a { color: #818cf8; }
+.evidence { margin-top: 0.35rem; font-size: 0.8rem; color: #9ca3af; font-style: italic; }
+.fetched { color: #6ee7b7; font-weight: 600; }
+.notfetched { color: #fca5a5; font-weight: 600; }
 .loading { text-align: center; padding: 2rem; color: #666; }
 .error-banner { background: #7f1d1d; color: #fca5a5; padding: 1rem; border-radius: 8px; margin-bottom: 1rem; }
 .connect-btn { margin-bottom: 1rem; }
@@ -81,361 +86,185 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   </div>
 </div>
 
+<script src="genlayer.bundle.js"></script>
 <script>
 const CONTRACT = '0x7af5D10bf14774A2e5ce0129F46dcb625F0E9ce2';
 const RPC = 'https://rpc-bradbury.genlayer.com';
 const EXPLORER = 'https://explorer-bradbury.genlayer.com';
+const FEE = '100000000000010352';
 
 let wallet = null;
-let pollingInterval = null;
+let client = null;
 
-// Function selectors
-const SELECTORS = {
-  total_articles: '0x3fa4f245',
-  get_article: '0x2e046461',
-  get_verdict: '0x4e6e6798',
-  list_pending: '0x8e3f6b2a',
-  submit_article: '0x9b8e4c1f',
-  resolve_article: '0x7c8a9d2e',
-};
-
-// ABI encoding helpers
-function encodeString(str) {
-  const encoded = new TextEncoder().encode(str);
-  const padded = new Uint8Array(Math.ceil((encoded.length + 1) / 32) * 32);
-  padded.set(encoded);
-  const lenHex = encoded.length.toString(16).padStart(64, '0');
-  return '0x' + lenHex + Array.from(padded).map(b => b.toString(16).padStart(2, '0')).join('');
-}
-
-async function rpc(method, params) {
-  const res = await fetch(RPC, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', method, params, id: 1 })
+// ---- official genlayer-js SDK (bundled) -------------------------------
+function makeClient() {
+  const { createClient, chains } = GenLayerJS;
+  // account is the connected wallet address string + provider = injected
+  // wallet, so writes are signed by the wallet and reads are decoded by the SDK.
+  return createClient({
+    chain: chains.testnetBradbury,
+    account: wallet,
+    provider: window.ethereum,
   });
-  const data = await res.json();
-  if (data.error) throw new Error(data.error.message);
-  return data.result;
 }
 
-function decodeString(hex) {
-  if (!hex || hex === '0x') return '';
-  const bytes = new Uint8Array(hex.slice(2).match(/.{2}/g).map(b => parseInt(b, 16)));
-  const len = parseInt(hex.slice(2, 66), 16);
-  return new TextDecoder().decode(bytes.slice(0, len));
+function parseMaybeJson(x) {
+  if (typeof x !== 'string') return x;
+  try { return JSON.parse(x); } catch { return x; }
 }
 
-function decodeJson(hex) {
-  const str = decodeString(hex);
-  try { return JSON.parse(str); } catch { return str; }
+async function readFn(fn, args) {
+  const res = await client.readContract({ address: CONTRACT, functionName: fn, args });
+  return parseMaybeJson(res);
 }
 
 async function connectWallet() {
   try {
-    if (!window.ethereum) {
-      showError('No wallet found. Please install MetaMask or another Web3 wallet.');
-      return;
-    }
-
+    if (!window.ethereum) { showError('No wallet found. Install MetaMask or another Web3 wallet.'); return; }
     try {
-      await window.ethereum.request({
-        method: 'wallet_switchEthereumChain',
-        params: [{ chainId: '0x107d' }],
-      });
-    } catch (switchError) {
-      await window.ethereum.request({
-        method: 'wallet_addEthereumChain',
-        params: [{
-          chainId: '0x107d',
-          chainName: 'GenLayer Bradbury Testnet',
-          nativeCurrency: { name: 'GEN', symbol: 'GEN', decimals: 18 },
-          rpcUrls: [RPC],
-          blockExplorerUrls: [EXPLORER],
-        }],
-      });
+      await window.ethereum.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: '0x107d' }] });
+    } catch (e) {
+      await window.ethereum.request({ method: 'wallet_addEthereumChain', params: [{
+        chainId: '0x107d', chainName: 'GenLayer Bradbury Testnet',
+        nativeCurrency: { name: 'GEN', symbol: 'GEN', decimals: 18 },
+        rpcUrls: [RPC], blockExplorerUrls: [EXPLORER],
+      }] });
     }
-
     const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
     wallet = accounts[0];
-    
+    client = makeClient();
     document.getElementById('connectSection').classList.add('hidden');
     document.getElementById('appSection').classList.remove('hidden');
     hideError();
     loadArticles();
-  } catch (e) {
-    showError('Connection failed: ' + e.message);
-  }
+  } catch (e) { showError('Connection failed: ' + e.message); }
 }
 
 async function submitArticle() {
   const url = document.getElementById('articleUrl').value.trim();
   if (!url) return;
-
   const btn = document.getElementById('submitBtn');
   btn.disabled = true;
   document.getElementById('submitStatus').innerHTML = '<div class="status status-info"><span class="spinner"></span>Submitting...</div>';
-
   try {
-    const data = SELECTORS.submit_article + encodeString(url).slice(2);
-    const hash = await rpc('eth_sendTransaction', [{
-      from: wallet,
-      to: CONTRACT,
-      data: data,
-    }]);
-
-    document.getElementById('submitStatus').innerHTML = `<div class="status status-success">Submitted! Tx: <a href="${EXPLORER}/tx/${hash}" target="_blank" style="color:#6ee7b7;">${hash.slice(0, 20)}...</a></div>`;
+    const hash = await client.writeContract({
+      address: CONTRACT, functionName: 'submit_article', args: [url], value: 0n, fees: { feeValue: FEE },
+    });
+    document.getElementById('submitStatus').innerHTML = `<div class="status status-success">Submitted! Tx: <a href="${EXPLORER}/tx/${hash}" target="_blank" style="color:#6ee7b7;">${String(hash).slice(0,20)}...</a></div>`;
     document.getElementById('articleUrl').value = '';
-    
-    setTimeout(loadArticles, 3000);
+    setTimeout(loadArticles, 4000);
   } catch (e) {
-    document.getElementById('submitStatus').innerHTML = `<div class="status status-error">${e.message}</div>`;
-  } finally {
-    btn.disabled = false;
-  }
+    document.getElementById('submitStatus').innerHTML = `<div class="status status-error">${e.message || e}</div>`;
+  } finally { btn.disabled = false; }
 }
 
 async function loadArticles() {
   const list = document.getElementById('articlesList');
   list.innerHTML = '<div class="loading">Loading...</div>';
-
   try {
-    const totalHex = await rpc('eth_call', [{ to: CONTRACT, data: SELECTORS.total_articles }, 'latest']);
-    const total = parseInt(totalHex, 16);
-
-    if (total === 0) {
-      list.innerHTML = '<div class="loading">No articles yet. Submit one above!</div>';
-      return;
-    }
-
+    const total = Number(await readFn('total_articles', []));
+    if (!total) { list.innerHTML = '<div class="loading">No articles yet. Submit one above!</div>'; return; }
     let html = '';
     for (let i = 1; i <= total; i++) {
       const id = `article-${i}`;
-      
-      const articleHex = await rpc('eth_call', [{ to: CONTRACT, data: SELECTORS.get_article + encodeString(id).slice(2) }, 'latest']);
-      const article = decodeJson(articleHex);
-
-      if (!article.exists) continue;
-
-      let verdictHtml = '';
-      let actionHtml = '';
-
+      const article = await readFn('get_article', [id]);
+      if (!article || !article.exists) continue;
+      let verdictHtml = '', actionHtml = '';
       if (article.status === 'RESOLVED') {
-        const verdictHex = await rpc('eth_call', [{ to: CONTRACT, data: SELECTORS.get_verdict + encodeString(id).slice(2) }, 'latest']);
-        const verdict = decodeJson(verdictHex);
-        if (verdict.exists) {
+        const verdict = await readFn('get_verdict', [id]);
+        if (verdict && verdict.exists) {
           const claims = verdict.claims || [];
-          const claimsHtml = claims.length > 0 
-            ? `<ul class="claims">${claims.map(c => `<li>${c}</li>`).join('')}</ul>` 
-            : '';
-          verdictHtml = `
-            <div style="margin-top:0.5rem;">
-              <span class="verdict verdict-${verdict.verdict}">${verdict.verdict}</span>
-              ${verdict.reasoning ? `<p style="font-size:0.85rem;color:#aaa;margin-top:0.5rem;">${verdict.reasoning}</p>` : ''}
-              ${claimsHtml}
-            </div>`;
+          const claimsHtml = claims.length ? `<ul class="claims">${claims.map(c=>`<li>${escapeHtml(c)}</li>`).join('')}</ul>` : '';
+          const srcs = verdict.sources || [];
+          const srcHtml = srcs.map(s => `
+            <div class="source">
+              <span class="${s.source_fetched ? 'fetched' : 'notfetched'}">${s.source_fetched ? 'source fetched' : 'no source fetched'}</span>
+              ${s.source_url ? `· <a href="${escapeHtml(s.source_url)}" target="_blank">${escapeHtml(s.source_url)}</a>` : ''}
+              ${s.evidence ? `<div class="evidence">“${escapeHtml(s.evidence)}”</div>` : ''}
+            </div>`).join('');
+          verdictHtml = `<div style="margin-top:0.5rem;">
+            <span class="verdict verdict-${verdict.verdict}">${verdict.verdict}</span>
+            ${verdict.reasoning ? `<p style="font-size:0.85rem;color:#aaa;margin-top:0.5rem;">${escapeHtml(verdict.reasoning)}</p>` : ''}
+            ${claimsHtml}${srcHtml}</div>`;
         }
       } else {
-        // Pending article — show resolve button
-        actionHtml = `
-          <div style="margin-top:0.75rem;">
-            <button class="btn-success" onclick="resolveArticle('${id}')" id="resolveBtn-${id}">
-              Run AI Verification
-            </button>
-          </div>
-          <div id="resolveStatus-${id}"></div>`;
+        actionHtml = `<div style="margin-top:0.75rem;">
+          <button class="btn-success" onclick="resolveArticle('${id}')" id="resolveBtn-${id}">Run AI Verification</button>
+        </div><div id="resolveStatus-${id}"></div>`;
       }
-
-      html += `
-        <div class="article-item">
-          <div class="url">${article.url}</div>
-          <div class="meta">
-            ID: ${article.article_id} · Status: ${article.status} · 
-            Submitted: ${new Date(article.submitted_at * 1000).toLocaleString()}
-          </div>
-          ${verdictHtml}
-          ${actionHtml}
-        </div>`;
+      html += `<div class="article-item">
+        <div class="url">${escapeHtml(article.url)}</div>
+        <div class="meta">ID: ${article.article_id} · Status: ${article.status} · Submitted: ${new Date(article.submitted_at*1000).toLocaleString()}</div>
+        ${verdictHtml}${actionHtml}</div>`;
     }
-
     list.innerHTML = html || '<div class="loading">No articles found.</div>';
   } catch (e) {
-    list.innerHTML = `<div class="status status-error">Error: ${e.message}</div>`;
+    list.innerHTML = `<div class="status status-error">Error: ${e.message || e}</div>`;
   }
 }
-
-// ============================================================
-// Resolve Article with Retry & Polling
-// ============================================================
 
 async function resolveArticle(articleId) {
   const btn = document.getElementById(`resolveBtn-${articleId}`);
   const statusDiv = document.getElementById(`resolveStatus-${articleId}`);
-  
   btn.disabled = true;
-  statusDiv.innerHTML = `
-    <div class="status status-info" style="margin-top:0.75rem;">
-      <span class="spinner"></span>Verifying Article (This may take up to 45 seconds)...
-    </div>
-    <div class="progress-bar"><div class="progress-bar-fill" id="progress-${articleId}" style="width:0%"></div></div>
-  `;
+  statusDiv.innerHTML = `<div class="status status-info" style="margin-top:0.75rem;"><span class="spinner"></span>Verifying — validators independently retrieve sources and reach consensus (may take a few minutes)...</div>
+    <div class="progress-bar"><div class="progress-bar-fill" id="progress-${articleId}" style="width:10%"></div></div>`;
 
-  // Animate progress bar
-  let progress = 0;
-  const progressInterval = setInterval(() => {
-    progress = Math.min(progress + 2, 90);
-    const bar = document.getElementById(`progress-${articleId}`);
-    if (bar) bar.style.width = progress + '%';
-  }, 1000);
+  let progress = 10;
+  const pi = setInterval(() => { progress = Math.min(progress + 2, 90); const b = document.getElementById(`progress-${articleId}`); if (b) b.style.width = progress + '%'; }, 1000);
 
+  // Consensus is non-deterministic; retry the resolve a few times.
+  let agreed = false, lastHash = '';
   try {
-    // Step 1: Submit resolve transaction
-    const data = SELECTORS.resolve_article + encodeString(articleId).slice(2);
-    const hash = await rpc('eth_sendTransaction', [{
-      from: wallet,
-      to: CONTRACT,
-      data: data,
-    }]);
-
-    // Step 2: Start polling for verdict
-    statusDiv.innerHTML = `
-      <div class="status status-info" style="margin-top:0.75rem;">
-        <span class="spinner"></span>Transaction submitted. Waiting for consensus...
-      </div>
-      <div class="progress-bar"><div class="progress-bar-fill" id="progress-${articleId}" style="width:50%"></div></div>
-    `;
-
-    // Poll every 5 seconds for up to 60 seconds
-    const maxPolls = 12;
-    let polls = 0;
-    let found = false;
-
-    while (polls < maxPolls && !found) {
-      await sleep(5000);
-      polls++;
-
-      try {
-        const verdictHex = await rpc('eth_call', [{ to: CONTRACT, data: SELECTORS.get_verdict + encodeString(articleId).slice(2) }, 'latest']);
-        const verdict = decodeJson(verdictHex);
-        
-        if (verdict.exists) {
-          found = true;
-          clearInterval(progressInterval);
-          
-          const claims = verdict.claims || [];
-          const claimsHtml = claims.length > 0 
-            ? `<ul class="claims">${claims.map(c => `<li>${c}</li>`).join('')}</ul>` 
-            : '';
-          
-          statusDiv.innerHTML = `
-            <div class="status status-success" style="margin-top:0.75rem;">
-              <span class="verdict verdict-${verdict.verdict}">${verdict.verdict}</span>
-              ${verdict.reasoning ? `<p style="font-size:0.85rem;color:#aaa;margin-top:0.5rem;">${verdict.reasoning}</p>` : ''}
-              ${claimsHtml}
-              <p style="font-size:0.8rem;color:#666;margin-top:0.5rem;">
-                Tx: <a href="${EXPLORER}/tx/${hash}" target="_blank" style="color:#6ee7b7;">${hash.slice(0, 20)}...</a>
-              </p>
-            </div>
-          `;
-          
-          // Refresh article status
-          setTimeout(loadArticles, 2000);
-        }
-      } catch (pollErr) {
-        // Ignore polling errors, keep trying
+    for (let a = 1; a <= 6 && !agreed; a++) {
+      statusDiv.innerHTML = `<div class="status status-info" style="margin-top:0.75rem;"><span class="spinner"></span>Consensus round ${a} of 6...</div>
+        <div class="progress-bar"><div class="progress-bar-fill" id="progress-${articleId}" style="width:${Math.min(20+a*12,90)}%"></div></div>`;
+      const hash = await client.writeContract({
+        address: CONTRACT, functionName: 'resolve_article', args: [articleId], value: 0n, fees: { feeValue: FEE },
+      });
+      lastHash = hash;
+      const r = await client.waitForTransactionReceipt({ hash, waitUntil: 'finalized', retries: 240 });
+      const res = r?.resultName || r?.consensusData?.resultName || '';
+      if (res === 'AGREE') agreed = true;
+      if (!agreed) await sleep(6000);
+    }
+    clearInterval(pi);
+    if (agreed) {
+      const verdict = await readFn('get_verdict', [articleId]);
+      if (verdict && verdict.exists) {
+        const claims = verdict.claims || [];
+        const srcs = verdict.sources || [];
+        const srcHtml = srcs.map(s => `
+          <div class="source">
+            <span class="${s.source_fetched ? 'fetched' : 'notfetched'}">${s.source_fetched ? 'source fetched' : 'no source fetched'}</span>
+            ${s.source_url ? `· <a href="${escapeHtml(s.source_url)}" target="_blank">${escapeHtml(s.source_url)}</a>` : ''}
+            ${s.evidence ? `<div class="evidence">“${escapeHtml(s.evidence)}”</div>` : ''}
+          </div>`).join('');
+        statusDiv.innerHTML = `<div class="status status-success" style="margin-top:0.75rem;">
+          <span class="verdict verdict-${verdict.verdict}">${verdict.verdict}</span>
+          ${verdict.reasoning ? `<p style="font-size:0.85rem;color:#aaa;margin-top:0.5rem;">${escapeHtml(verdict.reasoning)}</p>` : ''}
+          ${claims.length ? `<ul class="claims">${claims.map(c=>`<li>${escapeHtml(c)}</li>`).join('')}</ul>` : ''}
+          ${srcHtml}
+          <p style="font-size:0.8rem;color:#666;margin-top:0.5rem;">Tx: <a href="${EXPLORER}/tx/${lastHash}" target="_blank" style="color:#6ee7b7;">${String(lastHash).slice(0,20)}...</a></p>
+        </div>`;
+        setTimeout(loadArticles, 2000);
+        return;
       }
-
-      // Update progress
-      const bar = document.getElementById(`progress-${articleId}`);
-      if (bar) bar.style.width = Math.min(50 + polls * 5, 95) + '%';
     }
-
-    // Step 3: If not found after 60s, show retry option
-    if (!found) {
-      clearInterval(progressInterval);
-      statusDiv.innerHTML = `
-        <div class="status status-warning" style="margin-top:0.75rem;">
-          <p>Network busy. The transaction may still be processing.</p>
-          <p style="font-size:0.8rem;color:#aaa;margin-top:0.5rem;">
-            Tx: <a href="${EXPLORER}/tx/${hash}" target="_blank" style="color:#fcd34d;">${hash.slice(0, 20)}...</a>
-          </p>
-          <button class="btn-warning" onclick="resolveArticle('${articleId}')" style="margin-top:0.75rem;">
-            Retry Verification
-          </button>
-          <button class="btn-secondary" onclick="loadArticles()" style="margin-top:0.5rem;margin-left:0.5rem;">
-            Check Status
-          </button>
-        </div>
-      `;
-    }
-
+    statusDiv.innerHTML = `<div class="status status-warning" style="margin-top:0.75rem;">Consensus is slow right now. Your submission is saved on-chain — click Check Status in a few minutes.
+      ${lastHash ? `<p style="font-size:0.8rem;margin-top:0.5rem;">Tx: <a href="${EXPLORER}/tx/${lastHash}" target="_blank" style="color:#fcd34d;">${String(lastHash).slice(0,20)}...</a></p>` : ''}
+      <button class="btn-secondary" onclick="loadArticles()" style="margin-top:0.5rem;">Check Status</button></div>`;
   } catch (e) {
-    clearInterval(progressInterval);
-    
-    // Handle RPC timeout gracefully — check if it actually succeeded
-    if (e.message && (e.message.includes('timeout') || e.message.includes('LEADER_TIMEOUT'))) {
-      statusDiv.innerHTML = `
-        <div class="status status-info" style="margin-top:0.75rem;">
-          <span class="spinner"></span>Network timeout. Checking if verification succeeded...
-        </div>
-      `;
-      
-      // Wait 10s then check
-      await sleep(10000);
-      
-      try {
-        const verdictHex = await rpc('eth_call', [{ to: CONTRACT, data: SELECTORS.get_verdict + encodeString(articleId).slice(2) }, 'latest']);
-        const verdict = decodeJson(verdictHex);
-        
-        if (verdict.exists) {
-          const claims = verdict.claims || [];
-          const claimsHtml = claims.length > 0 
-            ? `<ul class="claims">${claims.map(c => `<li>${c}</li>`).join('')}</ul>` 
-            : '';
-          
-          statusDiv.innerHTML = `
-            <div class="status status-success" style="margin-top:0.75rem;">
-              <span class="verdict verdict-${verdict.verdict}">${verdict.verdict}</span>
-              ${verdict.reasoning ? `<p style="font-size:0.85rem;color:#aaa;margin-top:0.5rem;">${verdict.reasoning}</p>` : ''}
-              ${claimsHtml}
-            </div>
-          `;
-          setTimeout(loadArticles, 2000);
-          return;
-        }
-      } catch (checkErr) {
-        // Still not found
-      }
-      
-      // Show retry
-      statusDiv.innerHTML = `
-        <div class="status status-warning" style="margin-top:0.75rem;">
-          <p>Network busy. Please retry verification.</p>
-          <button class="btn-warning" onclick="resolveArticle('${articleId}')" style="margin-top:0.75rem;">
-            Retry Verification
-          </button>
-        </div>
-      `;
-    } else {
-      // Real error
-      statusDiv.innerHTML = `<div class="status status-error" style="margin-top:0.75rem;">${e.message}</div>`;
-    }
+    clearInterval(pi);
+    statusDiv.innerHTML = `<div class="status status-error" style="margin-top:0.75rem;">${e.message || e}</div>
+      <button class="btn-warning" onclick="resolveArticle('${articleId}')" style="margin-top:0.5rem;">Retry</button>`;
   }
 }
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function showError(msg) {
-  const el = document.getElementById('errorBanner');
-  el.textContent = msg;
-  el.classList.remove('hidden');
-}
-
-function hideError() {
-  document.getElementById('errorBanner').classList.add('hidden');
-}
+function escapeHtml(s){ return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+function showError(m){ const el=document.getElementById('errorBanner'); el.textContent=m; el.classList.remove('hidden'); }
+function hideError(){ document.getElementById('errorBanner').classList.add('hidden'); }
 
 document.getElementById('connectBtn').addEventListener('click', connectWallet);
 </script>
