@@ -37,21 +37,13 @@ async function waitFinal(h, label) {
     judge_address: addr, network: 'testnet-bradbury', chain_id: 4221, deployer: account.address,
   }, null, 2));
 
-  const url = 'https://en.wikipedia.org/wiki/Python_(programming_language)';
+  const url = 'https://example.com';
   console.log(`[2] submit_article(${url})`);
   const sh = await client.writeContract({ address: addr, functionName: 'submit_article', args: [url], value: 0n, fees: FEES });
   await waitFinal(sh, 'submit_article');
   await new Promise(x => setTimeout(x, 6000));
 
-  console.log('[3] retrieve_evidence (phase 1 — leader fetches + stores evidence)');
-  const eh = await client.writeContract({ address: addr, functionName: 'retrieve_evidence', args: ['article-1'], value: 0n, fees: FEES });
-  await waitFinal(eh, 'retrieve_evidence');
-  try {
-    const ev = await client.readContract({ address: addr, functionName: 'get_evidence', args: ['article-1'] });
-    console.log('  evidence:', ev);
-  } catch (e) { console.log('  (get_evidence not available)'); }
-
-  console.log('[4] resolve_article (phase 2 — consensus over stored evidence)');
+  console.log('[3] resolve_article (run_nondet: leader fetches, validators validate)');
   let agreed = false;
   for (let a = 1; a <= 8 && !agreed; a++) {
     console.log(`  resolve attempt ${a}...`);
@@ -64,7 +56,7 @@ async function waitFinal(h, label) {
   }
   console.log('consensus agreed:', agreed);
 
-  console.log('[5] get_verdict(article-1)');
+  console.log('[4] get_verdict(article-1)');
   const v = await client.readContract({ address: addr, functionName: 'get_verdict', args: ['article-1'] });
   console.log('VERDICT:', JSON.stringify(v, null, 2));
 })().catch(e => { console.error('ERROR:', e.message || e); process.exit(1); });

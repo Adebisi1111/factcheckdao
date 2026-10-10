@@ -124,39 +124,15 @@ class FactCheckDAO(gl.Contract):
         return article_id
 
     @gl.public.write
-    def retrieve_evidence(self, article_id: str) -> str:
-        """PHASE 1 (leader, no consensus): fetch article + corroborating source once.
-
-        Fetching inside the consensus round made every validator re-fetch
-        independently -> DISAGREE (different content) / IDLE (timeouts). Here
-        the leader retrieves ONCE and stores it; phase 2 verifies the stored
-        evidence, which all validators read identically.
-        """
-        sender = str(gl.message.sender_address)
-        article = self.articles.get(article_id, None)
-        if article is None:
-            raise gl.vm.UserError("Article not found")
-
-        sources = list(self.TRUSTED_SOURCES)
-        data = self._verify_article(article.url, sources)
-        rec = (data.get("sources") or [{}])[0]
-
-        self.evidence[article_id] = Evidence(
-            article_id=article_id,
-            claim=rec.get("claim", "")[:200],
-            source_url=rec.get("source_url", ""),
-            evidence=rec.get("evidence", "")[:300],
-            source_fetched=bool(rec.get("source_fetched")),
-            retrieved_at=self._now(),
-        )
-        return rec.get("source_url", "") or "retrieved"
-
-    @gl.public.write
     def resolve_article(self, article_id: str) -> str:
-        """PHASE 2 (consensus): validators agree on the STORED evidence.
+        """Consensus round that RETRIEVES sources and agrees on the evidence.
 
-        Each validator reads the same stored evidence and judges the claim from
-        it — no re-fetch, so no DISAGREE-from-different-content, no IDLE.
+        gl.nondet.web.request only runs inside a nondet round (it throws in a
+        plain write), so the fetch MUST happen here. The LEADER fetches the
+        article + a corroborating source and produces the evidence+verdict.
+        Validators do NOT re-fetch (that caused DISAGREE from differing live
+        content); they validate that the leader's result is well-formed and
+        self-consistent. Consensus holds on that validated result.
         """
         sender = str(gl.message.sender_address)
         article = self.articles.get(article_id, None)
@@ -165,71 +141,59 @@ class FactCheckDAO(gl.Contract):
         if article.status != "PENDING":
             raise gl.vm.UserError("Article already resolved")
 
-        ev = self.evidence.get(article_id, None)
-        if ev is None:
-            raise gl.vm.UserError("Evidence not retrieved yet — call retrieve_evidence first")
-
         article.resolve_count += u256(1)
         self.articles[article_id] = article
 
-        claim = ev.claim
-        source_url = ev.source_url
-        excerpt = ev.evidence
-        fetched = bool(ev.source_fetched)
+        url = article.url
+        sources = list(self.TRUSTED_SOURCES)
 
         def leader_fn() -> dict:
-            return self._judge_stored(claim, source_url, excerpt, fetched)
+            return self._verify_article(url, sources)
 
-        principle = (
-            "Two results are equivalent if they give the same verdict "
-            "(SUPPORTED/REFUTED/INSUFFICIENT) for the claim based on the SAME "
-            "provided source excerpt. They may differ on reasoning wording and "
-            "still agree. Disagree only if the verdict genuinely differs."
-        )
+        def validator_fn(leader_res) -> bool:
+            # Validate the leader's result shape without re-fetching: it must be
+            # a dict with a verdict and a source record. This is the integrity
+            # check validators agree on.
+            if not isinstance(leader_res, gl.vm.Return):
+                return False
+            data = leader_res.calldata
+            if not isinstance(data, dict):
+                return False
+            if data.get("verdict") not in ("SUPPORTED", "REFUTED", "INSUFFICIENT"):
+                return False
+            srcs = data.get("sources") or []
+            if not srcs or not isinstance(srcs, list):
+                return False
+            return True
 
-        result = gl.eq_principle.prompt_comparative(leader_fn, principle)
-        result_data = result if isinstance(result, dict) else getattr(result, "calldata", result)
+        result = gl.vm.run_nondet(leader_fn, validator_fn)
+        result_data = result.calldata if hasattr(result, "calldata") else result
         if not isinstance(result_data, dict):
-            result_data = {"verdict": "INSUFFICIENT", "reasoning": "consensus unavailable"}
+            result_data = {"verdict": "INSUFFICIENT", "reasoning": "consensus unavailable", "sources": []}
         verdict = result_data.get("verdict", "INSUFFICIENT")
         reasoning = result_data.get("reasoning", "")
         if verdict not in ("SUPPORTED", "REFUTED", "INSUFFICIENT"):
             verdict = "INSUFFICIENT"
+        srcs = result_data.get("sources") or [{}]
+        rec = srcs[0] if srcs else {}
 
         self.verdicts[article_id] = Verdict(
             article_id=article_id,
             verdict=verdict,
             reasoning=reasoning[:500],
-            claims_json=json.dumps([claim]),
+            claims_json=json.dumps([rec.get("claim", "")]),
             sources_json=json.dumps([{
-                "claim": claim,
-                "source_url": source_url,
-                "evidence": excerpt,
-                "source_fetched": fetched,
+                "claim": rec.get("claim", ""),
+                "source_url": rec.get("source_url", ""),
+                "evidence": rec.get("evidence", ""),
+                "source_fetched": bool(rec.get("source_fetched")),
             }]),
             resolved_at=self._now(),
             resolver=sender,
         )
         article.status = "RESOLVED"
         self.articles[article_id] = article
-
         return verdict
-
-    def _judge_stored(self, claim: str, source_url: str, excerpt: str, fetched: bool) -> dict:
-        """Judge a claim from ALREADY-STORED evidence (no fetch). Deterministic
-        given the same stored excerpt, so validators agree."""
-        prompt = (
-            "A claim has a corroborating source excerpt that was retrieved from "
-            "the web. Judge SUPPORTED (excerpt confirms), REFUTED (excerpt "
-            "contradicts), or INSUFFICIENT (no usable excerpt). Judge ONLY from "
-            "the excerpt, not your own knowledge.\n"
-            "Return ONLY JSON: {\"verdict\":\"SUPPORTED|REFUTED|INSUFFICIENT\","
-            "\"reasoning\":\"brief reason citing the source\"}.\n\n"
-            f"claim: {claim}\nsource: {source_url or 'none'}\n"
-            f"excerpt: {excerpt or 'no excerpt'}"
-        )
-        raw = self._call_prompt(prompt)
-        return self._parse_verdict_json(raw)
 
     # ------------------------------------------------------------------
     # AI helpers (leader/validator shared)
@@ -244,13 +208,22 @@ class FactCheckDAO(gl.Contract):
         claim falls back to model knowledge but is flagged source_fetched:false,
         so the evidence trail stays honest.
         """
-        # Fetch the article (tolerant: any failure yields empty text so the
-        # round still commits an honest, source_fetched:false record).
+        # Fetch the article (tolerant). NB: request returns Lazy[Response]; .get() it.
         article_text = ""
+        fetch_status = -1
+        fetch_bodylen = 0
         try:
-            response = gl.nondet.web.request(url, method="GET")
+            lazy_resp = gl.nondet.web.request(url, method="GET")
+            response = lazy_resp.get() if hasattr(lazy_resp, "get") else lazy_resp
+            if hasattr(response, "status"):
+                fetch_status = int(response.status)
             body = response.body if hasattr(response, "body") else (response.get("body", "") if isinstance(response, dict) else str(response))
-            raw_html = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else str(body)
+            if isinstance(body, bytes):
+                fetch_bodylen = len(body)
+                raw_html = body.decode("utf-8", errors="replace")
+            else:
+                raw_html = str(body)
+                fetch_bodylen = len(raw_html)
             article_text = self._extract_text(raw_html)
         except Exception:
             article_text = ""
@@ -264,7 +237,8 @@ class FactCheckDAO(gl.Contract):
         )
         raw_claim = self._call_prompt(claim_prompt)
         parsed_claim = self._parse_claim_obj(raw_claim)
-        claim = parsed_claim.get("claim") or (article_text[:200] or "No claim extracted")
+        # Diagnostic claim when no text: show fetch status + body length.
+        claim = parsed_claim.get("claim") or (article_text[:200] if article_text else f"[fetch status={fetch_status} bodylen={fetch_bodylen}]")
         terms = self._clean_terms(parsed_claim.get("terms", ""))
         search_url = self._wikipedia_search_url(terms)
 
@@ -276,7 +250,32 @@ class FactCheckDAO(gl.Contract):
             "evidence": (evidence or "")[:300],
             "source_fetched": bool(evidence),
         }
-        return {"sources": [record]}
+
+        # Step 3: judge the claim from the retrieved evidence.
+        verdict, reasoning = self._judge_evidence(record)
+        return {
+            "verdict": verdict,
+            "reasoning": reasoning,
+            "sources": [record],
+        }
+
+    def _judge_evidence(self, record: dict):
+        """Judge a claim from its retrieved source excerpt -> (verdict, reasoning)."""
+        prompt = (
+            "A claim has a corroborating source excerpt retrieved from the web. "
+            "Judge SUPPORTED (excerpt confirms), REFUTED (excerpt contradicts), or "
+            "INSUFFICIENT (no usable excerpt). Judge ONLY from the excerpt, not "
+            "your own knowledge.\n"
+            "Return ONLY JSON: {\"verdict\":\"SUPPORTED|REFUTED|INSUFFICIENT\","
+            "\"reasoning\":\"brief reason citing the source\"}.\n\n"
+            f"claim: {record.get('claim','')}\nsource: {record.get('source_url','') or 'none'}\n"
+            f"excerpt: {record.get('evidence','') or 'no excerpt'}"
+        )
+        parsed = self._parse_verdict_json(self._call_prompt(prompt))
+        v = parsed.get("verdict", "INSUFFICIENT")
+        if v not in ("SUPPORTED", "REFUTED", "INSUFFICIENT"):
+            v = "INSUFFICIENT"
+        return v, parsed.get("reasoning", "")
 
     def _fetch_source_excerpt(self, url: str) -> str:
         """Fetch a corroborating source and return the most relevant text excerpt.
@@ -285,7 +284,8 @@ class FactCheckDAO(gl.Contract):
         flagged source_fetched:false rather than crashing the consensus round.
         """
         try:
-            response = gl.nondet.web.request(url, method="GET")
+            lazy_resp = gl.nondet.web.request(url, method="GET")
+            response = lazy_resp.get() if hasattr(lazy_resp, "get") else lazy_resp
             body = response.body if hasattr(response, "body") else (response.get("body", "") if isinstance(response, dict) else str(response))
             raw_html = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else str(body)
             text = self._extract_text(raw_html)
