@@ -1,7 +1,7 @@
 # FactCheckDAO
 
 **Live App:** [https://adebisi1111.github.io/factcheckdao/](https://adebisi1111.github.io/factcheckdao/)
-**Contract:** [`0xa0213ed1883a18b44B149510885395e0BDc98858`](https://explorer-bradbury.genlayer.com/address/0xa0213ed1883a18b44B149510885395e0BDc98858) on GenLayer Bradbury Testnet
+**Contract:** [`0x7af5D10bf14774A2e5ce0129F46dcb625F0E9ce2`](https://explorer-bradbury.genlayer.com/address/0x7af5D10bf14774A2e5ce0129F46dcb625F0E9ce2) on GenLayer Bradbury Testnet
 
 A GenLayer Intelligent Contract for decentralized, source-backed fact-checking. Given an article URL, a committee of AI validators extracts a factual claim, **retrieves a real corroborating source from the web**, and reaches consensus on a verdict — **SUPPORTED**, **REFUTED**, or **INSUFFICIENT** — backed by the retrieved evidence, not the model's own knowledge.
 
@@ -32,7 +32,7 @@ submit_article(url)
 ```
 
 1. **Submit** — `submit_article(url)` stores the article on-chain with status `PENDING`.
-2. **Resolve** — `resolve_article(article_id)` runs a `gl.vm.run_nondet` consensus round. The **leader** fetches the article, extracts a verifiable claim, retrieves a corroborating source, and judges the claim from the retrieved excerpt. **Validators** verify the leader's result is well-formed and self-consistent (claim present, source recorded, valid verdict) — consensus holds on that validated, evidence-backed result.
+2. **Resolve** — `resolve_article(article_id)` runs a `gl.eq_principle.prompt_comparative` consensus round. **Each validator independently** fetches the article, extracts a verifiable claim, retrieves a corroborating source, and judges the claim from the retrieved excerpt. Consensus holds only when the validators agree on the verdict reached from the evidence.
 3. **Read** — `get_verdict(article_id)` returns the verdict together with the recorded claim, source URL, retrieved evidence excerpt, and a `source_fetched` flag.
 
 ### Verdict states
@@ -49,7 +49,7 @@ Each record carries `source_fetched: true/false`, so a verdict is never silently
 
 ## Consensus design
 
-`gl.nondet.web.request` only executes inside a nondeterministic round, so the retrieval happens in the `run_nondet` leader. Rather than have every validator independently re-fetch live web content — which is nondeterministic and slow, and caused consensus to disagree or time out — the **leader retrieves once** and **validators validate the result**. This makes the round fast and reliable while still requiring validators to agree on evidence-backed output.
+`gl.nondet.web.request` only runs inside a nondeterministic round, so retrieval happens in the consensus round. **Every validator independently** fetches the article, extracts the claim, retrieves the corroborating source, and judges the claim from the retrieved excerpt. Consensus holds — via `gl.eq_principle.prompt_comparative` — only when the validators **independently agree** on the verdict reached from the evidence. This is genuine verification: a validator that retrieves different evidence, or reaches a different verdict from it, breaks consensus.
 
 ---
 
@@ -59,8 +59,8 @@ Each record carries `source_fetched: true/false`, so a verdict is never silently
 |---|---|
 | Network | GenLayer Bradbury Testnet |
 | Chain ID | 4221 |
-| Address | `0xa0213ed1883a18b44B149510885395e0BDc98858` |
-| Explorer | [View on Bradbury Explorer](https://explorer-bradbury.genlayer.com/address/0xa0213ed1883a18b44B149510885395e0BDc98858) |
+| Address | `0x7af5D10bf14774A2e5ce0129F46dcb625F0E9ce2` |
+| Explorer | [View on Bradbury Explorer](https://explorer-bradbury.genlayer.com/address/0x7af5D10bf14774A2e5ce0129F46dcb625F0E9ce2) |
 | Runner | `py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6` |
 
 ### API
@@ -80,14 +80,14 @@ Each record carries `source_fetched: true/false`, so a verdict is never silently
 
 ## Verified on-chain
 
-A live run against `https://example.com` reached consensus and committed:
+A live run against `https://httpbin.org/html` (a Moby-Dick prose page) reached consensus and committed:
 
-- **Claim:** *"The .example top-level domain is reserved for documentation and illustrative purposes."*
-- **Retrieved source:** `https://en.wikipedia.org/w/index.php?search=...` — `source_fetched: true`
-- **Evidence (recorded on-chain):** the actual Wikipedia response text
-- **Verdict:** `INSUFFICIENT` (the fetched page did not corroborate the claim)
+- **Claim:** *"Perth is the old blacksmith character in Herman Melville's novel Moby-Dick."*
+- **Retrieved source:** `https://en.wikipedia.org/wiki/Moby_Dick` — `source_fetched: true`
+- **Evidence (recorded on-chain):** the actual Wikipedia article excerpt
+- **Verdict:** `INSUFFICIENT` — validators independently read the fetched article and correctly judged it does not mention the claimed character
 
-Consensus reached `AGREE` on the first round; the verdict and its retrieved evidence are readable via `get_verdict` and the explorer.
+Consensus reached `AGREE`; the verdict and its retrieved evidence are readable via `get_verdict` and the explorer. Because validators independently retrieve and judge, this is genuine verification — not a label check.
 
 ---
 
@@ -105,7 +105,7 @@ Consensus reached `AGREE` on the first round; the verdict and its retrieved evid
 ```bash
 genlayer network set testnet-bradbury
 
-ADDR=0xa0213ed1883a18b44B149510885395e0BDc98858
+ADDR=0x7af5D10bf14774A2e5ce0129F46dcb625F0E9ce2
 
 # Submit an article
 genlayer write $ADDR submit_article --args https://example.com
