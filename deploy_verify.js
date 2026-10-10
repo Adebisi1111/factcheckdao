@@ -37,7 +37,7 @@ async function waitFinal(h, label) {
     judge_address: addr, network: 'testnet-bradbury', chain_id: 4221, deployer: account.address,
   }, null, 2));
 
-  const url = 'https://example.com';
+  const url = 'https://httpbin.org/html';
   console.log(`[2] submit_article(${url})`);
   const sh = await client.writeContract({ address: addr, functionName: 'submit_article', args: [url], value: 0n, fees: FEES });
   await waitFinal(sh, 'submit_article');
