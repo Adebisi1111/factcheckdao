@@ -2,13 +2,11 @@
 
 
 """
-FactCheckDAO — source-backed fact-checking via GenLayer AI consensus.
-
-Submitter posts an article URL. Each validator independently fetches it,
-extracts a claim, RETRIEVES a corroborating source, and judges the claim from
-that evidence, reaching consensus via gl.eq_principle.prompt_comparative.
+FactCheckDAO — source-backed fact-checking. Each validator independently
+fetches the article and a corroborating source and judges the claim from it.
 """
 
+import hashlib
 import json
 import re
 from datetime import datetime, timezone
@@ -33,9 +31,7 @@ class Article:
     url: str
     submitter: str
     submitted_at: u256
-    # PENDING -> majority verdict -> RESOLVED ; UNDETERMINED -> stays PENDING
     status: str
-    # Number of consensus rounds this article has gone through.
     resolve_count: u256
 
 
@@ -49,7 +45,6 @@ class Verdict:
     reasoning: str
     # Claims are stored as a JSON-encoded string; clients parse on read.
     claims_json: str
-    # Per-claim corroboration: [{claim, verdict, source_url, evidence, source_fetched}]
     # This is the retrieved, recorded evidence the verdict rests on.
     sources_json: str
     resolved_at: u256
@@ -62,7 +57,7 @@ class Verdict:
 
 
 class FactCheckDAO(gl.Contract):
-    """Source-backed fact-checking via AI consensus."""
+    """Source-backed fact-checking."""
 
     # Authoritative sources that corroborate factual claims.
     TRUSTED_SOURCES: DynArray[str]
@@ -107,9 +102,8 @@ class FactCheckDAO(gl.Contract):
     def resolve_article(self, article_id: str) -> str:
         """Every validator independently fetches, retrieves a source, and judges.
 
-        The equivalence check binds the verdict AND that both the article and its
-        corroborating source were actually retrieved, so validators agree real
-        evidence backs the verdict rather than a bare label.
+        The equivalence check binds the verdict, the evidence hash and the
+        retrieved flags.
         """
         sender = str(gl.message.sender_address)
         article = self.articles.get(article_id, None)
@@ -118,14 +112,10 @@ class FactCheckDAO(gl.Contract):
         if article.status != "PENDING":
             raise gl.vm.UserError("Article already resolved")
 
-        article.resolve_count += u256(1)
-        self.articles[article_id] = article
-
         url = article.url
         sources = list(self.TRUSTED_SOURCES)
 
-        # Every validator derives the SAME evidence identity, so it is
-        # reproducible and can be bound to agreement.
+        # Every validator derives the SAME evidence identity.
         def leader_fn() -> dict:
             full = self._verify_article(url, sources)
             srcs = full.get("sources") or []
@@ -137,20 +127,19 @@ class FactCheckDAO(gl.Contract):
                 # The URL is the deterministic handle on the evidence: binding
                 # it means validators evaluated the SAME evidence.
                 "source_url": str(rec.get("source_url", "")),
+                # Hash of the deterministic excerpt: exact evidence agreement.
+                "evidence_hash": str(rec.get("evidence_hash", "")),
                 "grounded": str(rec.get("grounded", "")),
                 "reasoning": str(full.get("reasoning", "")),
             }
 
-        # The compared identity is limited to what every validator reproduces:
-        # the source URL, the two retrieved flags, and the verdict.
         principle = (
-            "Equivalent ONLY when ALL FOUR match: (1) source_url is the identical "
-            "URL, (2) article_fetched is the same boolean, (3) source_retrieved is "
-            "the same boolean, and (4) verdict is the same "
-            "SUPPORTED/REFUTED/INSUFFICIENT. The claim, evidence and reasoning are "
-            "free-form text that differs between independent runs — ignore them "
-            "entirely. If the source_url or any flag differs, they DO NOT agree, "
-            "even when the verdict label matches."
+            "Equivalent ONLY when ALL FIVE match exactly: (1) source_url is the "
+            "identical URL, (2) evidence_hash is the identical hex string, "
+            "(3) article_fetched, (4) source_retrieved and (5) verdict are the "
+            "same. Claim, evidence and reasoning wording may differ. If the URL, "
+            "the hash or any flag differs they DO NOT agree, even when the "
+            "verdict label matches."
         )
 
         result = gl.eq_principle.prompt_comparative(leader_fn, principle)
@@ -158,7 +147,6 @@ class FactCheckDAO(gl.Contract):
         if not isinstance(result_data, dict):
             result_data = {}
 
-        # The agreed value is the comparable triple.
         verdict = str(result_data.get("verdict", "INSUFFICIENT"))
         if verdict not in ("SUPPORTED", "REFUTED", "INSUFFICIENT"):
             verdict = "INSUFFICIENT"
@@ -169,32 +157,38 @@ class FactCheckDAO(gl.Contract):
         if not article_fetched:
             raise gl.vm.UserError(
                 "the submitted article could not be retrieved, so no verdict is "
-                "finalized: without the article text there is nothing to check "
-                "and any claim would be invented. Retry when the URL is reachable."
+                "finalized: any claim would be invented."
             )
         if not source_retrieved:
             raise gl.vm.UserError(
-                "no corroborating source could be retrieved; no verdict finalized."
+                "no corroborating source could be retrieved; not finalized."
             )
 
-        # From the AGREED result: source_url is what validators confirmed.
         source_url = str(result_data.get("source_url", ""))
-        evidence = str(result_data.get("evidence", ""))
+        evidence_hash = str(result_data.get("evidence_hash", ""))
         reasoning = str(result_data.get("reasoning", ""))[:500]
-        # The stored claim is the grounded excerpt from the fetched source.
         claim = str(result_data.get("grounded", ""))
+        evidence = claim
+
+        # The agreed evidence must be on-subject (checked after the values
+        # exist; the per-validator check already blocks off-subject rounds).
+        subject = self._subject_from_url(url)
+        blob = (claim + " " + evidence).lower()
+        if subject and subject.lower() not in blob:
+            raise gl.vm.UserError(
+                f"agreed evidence is off-subject ({subject!r}); not finalized."
+            )
 
         if not source_url or not claim:
             raise gl.vm.UserError(
-                "evidence trail unavailable; not finalized."
+                "evidence trail unavailable."
             )
         if verdict == "SUPPORTED" and not evidence.strip():
             raise gl.vm.UserError(
-                "SUPPORTED needs a retrieved excerpt; none found."
+                "SUPPORTED needs an excerpt; none found."
             )
 
-        article.resolve_count -= u256(1)
-        self.articles[article_id] = article
+        article.resolve_count += u256(1)
 
         self.verdicts[article_id] = Verdict(
             article_id=article_id,
@@ -205,6 +199,7 @@ class FactCheckDAO(gl.Contract):
                 "claim": claim,
                 "source_url": source_url,
                 "evidence": evidence,
+                "evidence_hash": evidence_hash,
                 "source_fetched": True,
                 "article_fetched": True,
             }]),
@@ -220,11 +215,10 @@ class FactCheckDAO(gl.Contract):
     # ------------------------------------------------------------------
 
     def _verify_article(self, url: str, sources: list) -> dict:
-        """Fetch article, extract a claim, retrieve a source."""
-        # Fetch the article (tolerant). NB: request returns Lazy[Response]; .get() it.
+
+        # Fetch the article (request returns Lazy[Response]; .get() it).
         article_text = ""
         fetch_status = -1
-        fetch_bodylen = 0
         article_fetched = False
         try:
             lazy_resp = gl.nondet.web.request(url, method="GET")
@@ -232,47 +226,60 @@ class FactCheckDAO(gl.Contract):
             if hasattr(response, "status"):
                 fetch_status = int(response.status)
             body = response.body if hasattr(response, "body") else (response.get("body", "") if isinstance(response, dict) else str(response))
-            if isinstance(body, bytes):
-                fetch_bodylen = len(body)
-                raw_html = body.decode("utf-8", errors="replace")
-            else:
-                raw_html = str(body)
-                fetch_bodylen = len(raw_html)
+            raw_html = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else str(body)
             article_text = self._extract_text(raw_html)
-            # Only "fetched" with usable text, else the model may invent a claim.
             if len(article_text.strip()) > 40 and fetch_status in (-1, 200):
                 article_fetched = True
         except Exception:
             article_text = ""
 
-        # Step 1: derive the title from the article, then fetch that page. The
-        # stored claim is taken from the FETCHED SOURCE, so it is grounded.
+        # Step 1: derive the source page, then fetch it. The stored claim is
+        # taken from the FETCHED SOURCE, so it is grounded.
         claim_prompt = (
-            "Give ONE verifiable factual claim from the article and the exact "
-            "title of the Wikipedia article that confirms or refutes it. Return "
-            "ONLY JSON: {\"claim\":\"...\",\"title\":\"...\"}.\n\n"
+            "Give ONE verifiable factual claim from the article. Return ONLY "
+            "JSON: {\"claim\":\"...\"}.\n\n"
             f"Article:\n{article_text[:2000]}"
         )
         raw_claim = self._call_prompt(claim_prompt)
         parsed_claim = self._parse_claim_obj(raw_claim)
-        # Diagnostic claim when no text: show fetch status + body length.
-        claim = parsed_claim.get("claim") or (article_text[:200] if article_text else f"[fetch status={fetch_status} bodylen={fetch_bodylen}]")
-        title = self._clean_terms(parsed_claim.get("title") or parsed_claim.get("terms", ""))
-        source_url = self._wikipedia_article_url(title)
+        claim = parsed_claim.get("claim") or (article_text[:200] if article_text else f"[fetch status={fetch_status}]")
 
-        # Step 2: actually fetch the corroborating source (evidence only).
-        evidence = self._fetch_source_excerpt(source_url)
+        # The source page must be deterministic: a free model choice sent it to
+        # unrelated pages, so no round produced on-subject evidence. A Wikipedia
+        # article is its own corroborating source.
+        title = ""
+        m = re.match(r"^https?://[a-z.]*wikipedia\.org/wiki/([^?#]+)", url, re.IGNORECASE)
+        if m:
+            title = m.group(1).replace("_", " ")
+        if not title:
+            title = self._clean_terms(parsed_claim.get("title") or parsed_claim.get("terms", ""))
+        source_url = self._wikipedia_article_url(title) if title else url
+
+        # Step 2: the excerpt is deterministic, so every validator derives
+        # byte-identical text. The hash is what they compare.
+        excerpt = self._stable_excerpt(self._fetch_source_excerpt(source_url))
+        evidence_hash = hashlib.sha256(excerpt.encode("utf-8")).hexdigest()
         record = {
             "claim": claim[:200],
             "source_url": source_url,
-            "evidence": (evidence or "")[:300],
-            "source_fetched": bool(evidence) and article_fetched,
+            "evidence": excerpt[:300],
+            "evidence_hash": evidence_hash,
+            "source_fetched": bool(excerpt) and article_fetched,
             "article_fetched": article_fetched,
-            # First sentence of the fetched source = grounded claim.
-            "grounded": (evidence or "").strip()[:200],
+            "grounded": excerpt[:200],
         }
 
-        # Step 3: judge the claim from the retrieved evidence.
+        # Step 3: the evidence must mention the article's subject (from the
+        # URL, identical on every validator). Off-subject -> INSUFFICIENT.
+        subject = self._subject_from_url(url)
+        blob = (str(record.get("claim", "")) + " " + str(record.get("grounded", ""))).lower()
+        if subject and subject.lower() not in blob:
+            return {
+                "verdict": "INSUFFICIENT",
+                "reasoning": f"the source does not mention the subject {subject!r}",
+                "sources": [record],
+            }
+
         verdict, reasoning = self._judge_evidence(record)
         return {
             "verdict": verdict,
@@ -281,13 +288,12 @@ class FactCheckDAO(gl.Contract):
         }
 
     def _judge_evidence(self, record: dict):
-        """Judge a claim from its excerpt."""
+
         prompt = (
-            "Judge the claim from the retrieved excerpt only. SUPPORTED "
-            "(confirms), REFUTED (contradicts), or INSUFFICIENT (no usable "
-            "excerpt). Return ONLY JSON: "
+            "Judge the claim from the excerpt only. SUPPORTED (confirms), "
+            "REFUTED (contradicts), INSUFFICIENT (none). Return ONLY JSON: "
             "{\"verdict\":\"SUPPORTED|REFUTED|INSUFFICIENT\","
-            "\"reasoning\":\"brief reason citing the source\"}.\n\n"
+            "\"reasoning\":\"brief reason\"}.\n\n"
             f"claim: {record.get('claim','')}\nexcerpt: {record.get('evidence','') or 'no excerpt'}"
         )
         parsed = self._parse_verdict_json(self._call_prompt(prompt))
@@ -297,7 +303,7 @@ class FactCheckDAO(gl.Contract):
         return v, parsed.get("reasoning", "")
 
     def _fetch_source_excerpt(self, url: str) -> str:
-        """Fetch a source; return a text excerpt."""
+
         try:
             lazy_resp = gl.nondet.web.request(url, method="GET")
             response = lazy_resp.get() if hasattr(lazy_resp, "get") else lazy_resp
@@ -313,33 +319,25 @@ class FactCheckDAO(gl.Contract):
             return ""
 
     def _extract_text(self, raw_html: str) -> str:
-        """Strip HTML to readable text."""
-        paragraphs = re.findall(r"<p[^>]*>(.*?)</p>", raw_html, flags=re.DOTALL | re.IGNORECASE)
-        clean_paragraphs = []
-        for p in paragraphs:
-            p = re.sub(r"<script[^>]*>.*?</script>", "", p, flags=re.DOTALL | re.IGNORECASE)
-            p = re.sub(r"<style[^>]*>.*?</style>", "", p, flags=re.DOTALL | re.IGNORECASE)
-            p = re.sub(r"<[^>]+>", "", p)
-            p = p.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"').replace("&#39;", "'").replace("&nbsp;", " ")
-            p = re.sub(r"\s+", " ", p).strip()
-            if p:
-                clean_paragraphs.append(p)
-        text = " ".join(clean_paragraphs)[:5000]
-        if not text:
-            t = re.sub(r"<script[^>]*>.*?</script>", "", raw_html, flags=re.DOTALL | re.IGNORECASE)
-            t = re.sub(r"<style[^>]*>.*?</style>", "", t, flags=re.DOTALL | re.IGNORECASE)
-            t = re.sub(r"<[^>]+>", " ", t)
-            t = re.sub(r"\s+", " ", t).strip()
-            text = t[:5000]
-        return text
+        """Strip HTML to plain text: <p> paragraphs, or the whole page as fallback."""
+
+        def strip(h: str) -> str:
+            h = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", h, flags=re.DOTALL | re.IGNORECASE)
+            h = re.sub(r"<[^>]+>", " ", h)
+            for a, b in (("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"), ("&quot;", '"'), ("&#39;", "'"), ("&nbsp;", " ")):
+                h = h.replace(a, b)
+            return re.sub(r"\s+", " ", h).strip()
+
+        paras = [strip(p) for p in re.findall(r"<p[^>]*>(.*?)</p>", raw_html, flags=re.DOTALL | re.IGNORECASE)]
+        text = " ".join(p for p in paras if p)[:5000]
+        return text or strip(raw_html)[:5000]
 
     # ------------------------------------------------------------------
     # Defensive JSON parsing helpers
     # ------------------------------------------------------------------
 
     def _call_prompt(self, prompt: str):
-        """Call exec_prompt and normalize to a string. Handles both the parsed
-        object and string forms; never lets an LLM failure crash the round."""
+        """exec_prompt -> string; never crash the round."""
         try:
             res = gl.nondet.exec_prompt(prompt)
         except Exception:
@@ -351,7 +349,7 @@ class FactCheckDAO(gl.Contract):
         return str(res)
 
     def _clean_terms(self, raw: str) -> str:
-        """Clean the LLM's term output."""
+
         if not raw:
             return ""
         # Drop obvious non-term lines (e.g. "Here are the terms:")
@@ -363,8 +361,33 @@ class FactCheckDAO(gl.Contract):
         # Cap length to keep the URL sane.
         return text[:120]
 
+    def _stable_excerpt(self, text: str, cap: int = 300) -> str:
+        """Whole sentences up to `cap`: byte-identical across validators, unlike
+        a raw byte slice which drifts with the page."""
+        t = re.sub(r"\s+", " ", str(text or "")).strip()
+        if not t:
+            return ""
+        out = ""
+        for sentence in re.split(r"(?<=[.!?]) ", t):
+            if not sentence:
+                continue
+            if len(out) + len(sentence) + 1 > cap:
+                break
+            out = (out + " " + sentence).strip() if out else sentence
+        return out or t[:cap]
+
+    def _subject_from_url(self, url: str) -> str:
+        """Subject keyword from the article URL; deterministic, no model output."""
+        try:
+            path = url.rsplit("/", 1)[-1].split("?")[0].split("#")[0]
+            path = path.replace("_", " ").replace("%20", " ").strip()
+            words = [w for w in re.split(r"[^A-Za-z0-9]+", path) if len(w) > 3]
+            return max(words, key=len) if words else ""
+        except Exception:
+            return ""
+
     def _wikipedia_article_url(self, title: str) -> str:
-        """Build a direct Wikipedia article url."""
+
         if not title:
             return "https://en.wikipedia.org/wiki/Main_Page"
         # Article URLs use underscores between words.
@@ -372,7 +395,7 @@ class FactCheckDAO(gl.Contract):
         return "https://en.wikipedia.org/wiki/" + quote(slug)
 
     def _parse_claim_obj(self, raw: str) -> dict:
-        """Parse LLM output into {claim, terms}."""
+
         raw = re.sub(r"```json\s*", "", raw, flags=re.IGNORECASE)
         raw = re.sub(r"```\s*", "", raw)
         m = re.search(r"\{.*\}", raw, flags=re.DOTALL)
@@ -391,7 +414,7 @@ class FactCheckDAO(gl.Contract):
         return {"claim": raw[:200], "title": "", "terms": ""}
 
     def _parse_verdict_json(self, raw: str) -> dict:
-        """Parse LLM verdict JSON."""
+
         raw = re.sub(r"```json\s*", "", raw, flags=re.IGNORECASE)
         raw = re.sub(r"```\s*", "", raw)
         match = re.search(r"\{.*\}", raw, flags=re.DOTALL)

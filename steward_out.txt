@@ -1,49 +1,48 @@
 FactCheckDAO — steward requirement proof on Bradbury
 
-contract: 0x23ECB16BB8c8Ee637aF73435D88073b16c091672 
+contract: 0x96F7cb98793626100F9322f66C6Fa77497fB18fc 
 
-Steward requirement: the equivalence check must bind the stored claim
-and evidence trail to validator agreement, and avoid finalizing
-unsupported or transiently unavailable evidence.
+Requirement: bind the stored claim and evidence trail to validator
+agreement, and avoid finalizing unsupported or transiently
+unavailable evidence.
 
-[A] a real article — the evidence trail is bound to agreement
+[A] real article — evidence trail is bound to agreement
   PASS  submit committed — AGREE
   PASS  article is PENDING
-
-  resolve attempt 1: IDLE/FINISHED_WITH_RETURN
-  resolve attempt 2: DISAGREE/FINISHED_WITH_RETURN
-  resolve attempt 3: AGREE/FINISHED_WITH_RETURN
+  resolve attempt 1: AGREE/FINISHED_WITH_RETURN
   PASS  validators reached consensus
-
   PASS  verdict stored — verdict=INSUFFICIENT
   PASS  article_fetched recorded true — =true
   PASS  source_fetched recorded true — =true
-  PASS  source_url recorded — https://en.wikipedia.org/wiki/Hello_World_program
-  PASS  claim is grounded in the fetched source — A "Hello, world" program is usually a simple computer program that out
-  FAIL  evidence excerpt recorded — len=0
+  PASS  source_url is the agreed URL — https://en.wikipedia.org/wiki/Hello_World_program
+  PASS  claim is grounded in the fetched source — A " Hello, world " program is usually a simple computer program t
+  PASS  evidence excerpt recorded — len=200
+  PASS  evidence hash recorded on-chain — b01fc088e3ae29c3af1f1a61…
+  PASS  evidence relates to the article subject — excerpt mentions the subject
+  PASS  resolve_count preserved — 1 (was 0)
 
-  STORED (this is what validators agreed on):
+  STORED (what validators agreed on):
     verdict        : INSUFFICIENT
     source_url     : https://en.wikipedia.org/wiki/Hello_World_program
     article_fetched: true
     source_fetched : true
-    claim (grounded): A "Hello, world" program is usually a simple computer program that outputs a message similar to
-    evidence       : …
-    reasoning      : The excerpt describes what a 'Hello, world' program is but does not mention its origin, a 1978 
+    claim (grounded): A " Hello, world " program is usually a simple computer program that outputs a message sim
+    reasoning      : The excerpt only generally describes “Hello, world” programs and does not mention the 1978
 
 [B] transiently unavailable evidence must NOT finalize
   PASS  bad article submitted — AGREE
-  attempt 1: IDLE/NOT_VOTED
-  attempt 2: DISAGREE/FINISHED_WITH_ERROR
-  attempt 3: IDLE/NOT_VOTED
-  attempt 4: DISAGREE/FINISHED_WITH_ERROR
+  attempt 1: AGREE/FINISHED_WITH_ERROR
+  attempt 2: IDLE/NOT_VOTED
+GenLayer RPC error (eth_call): Internal error
+  attempt 3: AGREE/FINISHED_WITH_ERROR
+  attempt 4: AGREE/FINISHED_WITH_ERROR
   PASS  unavailable evidence did NOT finalize — article-2 status=PENDING
   PASS  no verdict recorded for it — none stored
 
 count_pending: 1
 
-=== 11 passed, 1 failed ===
+=== 15 passed, 0 failed ===
 
-CONTRACT: 0x23ECB16BB8c8Ee637aF73435D88073b16c091672
-EXPLORER: https://explorer-bradbury.genlayer.com/address/0x23ECB16BB8c8Ee637aF73435D88073b16c091672
+CONTRACT: 0x96F7cb98793626100F9322f66C6Fa77497fB18fc
+EXPLORER: https://explorer-bradbury.genlayer.com/address/0x96F7cb98793626100F9322f66C6Fa77497fB18fc
 EXIT 0

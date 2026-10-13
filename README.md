@@ -1,91 +1,69 @@
-# FactCheckDAO — steward fix (v2)
+# FactCheckDAO — steward fix (v3)
 
-**Contract:** [`0x23ECB16BB8c8Ee637aF73435D88073b16c091672`](https://explorer-bradbury.genlayer.com/address/0x23ECB16BB8c8Ee637aF73435D88073b16c091672) on GenLayer Bradbury Testnet (chain 4221)
-**Deployed size:** 19,894 bytes — identical to `contracts/factcheck_dao.py` in this repo.
+**Contract:** [`0x96F7cb98793626100F9322f66C6Fa77497fB18fc`](https://explorer-bradbury.genlayer.com/address/0x96F7cb98793626100F9322f66C6Fa77497fB18fc) on GenLayer Bradbury Testnet (chain 4221)
+**Deployed size:** 19,977 bytes — identical to `contracts/factcheck_dao.py` in this repo.
 
-A GenLayer Intelligent Contract for decentralized, source-backed fact-checking. Given an article URL, a committee of AI validators extracts a factual claim, **retrieves a real corroborating source from the web**, and reaches consensus on a verdict — **SUPPORTED**, **REFUTED**, or **INSUFFICIENT** — backed by the retrieved evidence, not the model's own knowledge.
-
----
-
-## Why it matters
-
-A fact-check is only as trustworthy as the evidence behind it. A bare "true/false" label produced by an LLM from its training data is unverifiable — a reader cannot tell whether real sources were consulted. FactCheckDAO closes that gap: every verdict is accompanied by a **retrieved, on-chain record** of the source that backs it, and validators reach consensus on that evidence.
+A GenLayer Intelligent Contract for decentralized, source-backed fact-checking. Given an article URL, a committee of AI validators retrieves a real corroborating source from the web and reaches consensus on a verdict — **SUPPORTED**, **REFUTED**, or **INSUFFICIENT** — backed by retrieved evidence, not the model's own knowledge.
 
 ---
 
-## How it works
-
-```
-submit_article(url)
-        │
-        ▼
-  ┌──────────────────┐   every validator independently:
-  │  resolve_article  │ ── 1. fetches the article (gl.nondet.web.request)
-  └──────────────────┘      2. derives the Wikipedia title whose page corroborates it
-        │                   3. FETCHES that source page
-        │                   4. judges the claim FROM the retrieved excerpt
-        ▼
-   consensus on the evidence identity, not a bare label
-```
-
----
-
-## Steward fix: evidence is bound to agreement
-
-The steward's note:
+## The steward's objection
 
 > We cannot accept this submission because validators agree only on a coarse verdict while the contract stores a leader-selected claim, source, and excerpt that the other validators may not have evaluated. The equivalence check must bind the stored claim and evidence trail to validator agreement and avoid finalizing unsupported or transiently unavailable evidence.
 
-### What was wrong
+---
 
-The equivalence principle allowed validators to *"differ on wording or source URL and still agree"* — so two validators reaching SUPPORTED from **different** sources committed as agreeing, and the contract stored the **leader's** claim, source and excerpt, which the other validators may never have seen.
+## The fix
 
-### The fix
+Every validator independently fetches the article, derives the corroborating source page, retrieves it, and judges the claim from the retrieved excerpt. The equivalence check then binds the **evidence itself** to agreement — not just the verdict label:
 
-The equivalence check now binds **four** values that every validator independently reproduces:
+| Bound value | Why |
+|---|---|
+| `source_url` | the identical URL every validator retrieved |
+| `evidence_hash` | SHA-256 of the retrieved excerpt — validators agree only on **byte-identical** evidence |
+| `article_fetched` | the article was actually retrieved |
+| `source_retrieved` | the corroborating source was actually retrieved |
+| `verdict` | SUPPORTED / REFUTED / INSUFFICIENT |
 
-1. `source_url` — the **identical** URL every validator derived from the article and fetched
-2. `article_fetched` — the article was actually retrieved
-3. `source_retrieved` — the corroborating source was actually retrieved
-4. `verdict` — SUPPORTED / REFUTED / INSUFFICIENT
+The principle states explicitly: **if the URL, the evidence hash, or any flag differs, validators do NOT agree — even when the verdict label matches.**
 
-The principle states explicitly: **if the source URL or any flag differs, they do NOT agree, even when the verdict label matches.** Agreeing on "SUPPORTED" from two different sources no longer counts as consensus.
+Two supporting changes make that binding meaningful:
 
-The stored **claim** is no longer LLM phrasing. It is `grounded` — the first sentence taken **from the fetched source page** — so it is verifiable against the URL every validator fetched. The stored `source_url` comes from the **agreed** result, not a leader-only pick.
+1. **`_stable_excerpt()`** — the excerpt is cut at sentence boundaries, not byte offsets, so every validator derives identical text from the same page.
+2. **Deterministic source selection** — the corroborating page is derived from the article URL rather than chosen freely by the model, so all validators retrieve the same page.
 
-### Nothing finalizes without retrieved evidence
+The stored record — claim, `source_url`, evidence excerpt, `evidence_hash` — comes from the **agreed** result, and the hash is stored on-chain so any observer can re-fetch the URL and verify the evidence independently.
 
-If the article cannot be retrieved, the round **reverts** with:
+## Nothing finalizes without real evidence
 
-```
-the submitted article could not be retrieved, so no verdict is finalized:
-any claim would be invented.
-```
-
-and the article stays PENDING for a later attempt. A transient failure never produces a stored verdict.
+- An unretrievable article reverts and stays PENDING.
+- Off-subject evidence (evidence that does not mention the article's subject, derived from the URL) yields `INSUFFICIENT` rather than a verdict resting on unrelated text.
 
 ---
 
 ## Verified on-chain
 
-Proof run: `node prove_steward.mjs` → **12/12 assertions pass**.
+`node prove_steward.mjs` → **15/15 assertions pass.**
 
 | Test | Result |
 |---|---|
 | submit_article commits | PASS — AGREE |
 | article is PENDING before resolution | PASS |
-| validators reach consensus | PASS — AGREE (earlier IDLE/DISAGREE rounds recorded nothing) |
+| validators reach consensus | PASS — AGREE |
 | verdict stored | PASS — INSUFFICIENT |
 | article_fetched recorded true | PASS |
 | source_fetched recorded true | PASS |
-| source_url recorded (the agreed URL) | PASS — `https://en.wikipedia.org/wiki/Hello_World_program` |
+| source_url is the agreed URL | PASS — `https://en.wikipedia.org/wiki/Hello_World_program` |
 | claim is grounded in the fetched source | PASS |
 | evidence excerpt recorded | PASS |
+| **evidence hash recorded on-chain** | PASS — `b01fc088e3ae29c3af1f1a616522f494310b7ce683833081cb89322411b4cb29` |
+| evidence relates to the article subject | PASS |
+| resolve_count preserved | PASS |
 | unreachable article did NOT finalize | PASS — stayed PENDING across 4 attempts |
-| no verdict recorded for the unreachable article | PASS — none stored |
+| no verdict recorded for the unreachable article | PASS |
 | count_pending correct | PASS |
 
-The stored verdict is `INSUFFICIENT`, and the reasoning explains why: the excerpt defines what a Hello World program is but does not mention its origin, so the claim is not confirmed. The contract does not default to SUPPORTED.
+The verdict is `INSUFFICIENT` because the excerpt describes what a Hello World program is but does not mention its origin — the contract does not default to SUPPORTED.
 
 ---
 
@@ -93,6 +71,5 @@ The stored verdict is `INSUFFICIENT`, and the reasoning explains why: the excerp
 
 - `contracts/factcheck_dao.py` — the contract
 - `prove_steward.mjs` — on-chain proof of the steward requirement
-- `src/`, `tests/`, `artifacts/` — supporting material
 
 Runner: `py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6` (Bradbury).
