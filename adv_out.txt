@@ -1,0 +1,26 @@
+FactCheckDAO — ADVERSARIAL proof on Bradbury
+
+contract (rigged leader): 0x71C384848EAdb767CC7f59917D26F161b98c29Ce 
+
+The leader fabricates its evidence trail: a made-up source URL, a
+fabricated excerpt, and a hash of that fabrication. Every validator
+independently retrieves the REAL page. If the equivalence check binds
+the evidence, the fabricated hash cannot match and NOTHING commits.
+
+  PASS  submit committed — AGREE
+  round 1: AGREE/FINISHED_WITH_ERROR votes=["TIMEOUT","TIMEOUT","DISAGREE","DISAGREE","DISAGREE"]
+  round 2: IDLE/NOT_VOTED votes=["NOT_VOTED","NOT_VOTED","NOT_VOTED","NOT_VOTED","NOT_VOTED"]
+  round 3: AGREE/FINISHED_WITH_ERROR votes=["TIMEOUT","DISAGREE","DISAGREE","DISAGREE","DISAGREE"]
+  round 4: AGREE/FINISHED_WITH_ERROR votes=["DISAGREE","DISAGREE","TIMEOUT","DISAGREE","DISAGREE"]
+  round 5: AGREE/FINISHED_WITH_ERROR votes=["TIMEOUT","DISAGREE","DISAGREE","DISAGREE","DISAGREE"]
+
+  PASS  rigged leader did NOT commit — no round committed
+  PASS  no verdict stored — none stored
+  PASS  article left PENDING — status=PENDING
+  PASS  at least one round showed validator DISAGREE — 4 round(s) with DISAGREE votes
+
+=== 5 passed, 0 failed ===
+
+RIGGED CONTRACT: 0x71C384848EAdb767CC7f59917D26F161b98c29Ce
+EXPLORER: https://explorer-bradbury.genlayer.com/address/0x71C384848EAdb767CC7f59917D26F161b98c29Ce
+EXIT 0

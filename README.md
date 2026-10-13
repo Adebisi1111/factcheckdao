@@ -73,3 +73,41 @@ The verdict is `INSUFFICIENT` because the excerpt describes what a Hello World p
 - `prove_steward.mjs` — on-chain proof of the steward requirement
 
 Runner: `py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6` (Bradbury).
+
+---
+
+## Adversarial proof: a rigged leader cannot commit
+
+The submitted contract is `factcheck_dao.py`. A separate variant,
+`contracts/factcheck_dao_adversarial.py`, changes **only** `leader_fn`: the
+leader returns `SUPPORTED` with a fabricated source URL
+(`https://en.wikipedia.org/wiki/Fabricated_Source`), a fabricated excerpt, and
+the SHA-256 of that fabrication. Every validator runs the real path and
+retrieves the actual page.
+
+Because the equivalence check binds `evidence_hash`, the leader's fabricated
+hash cannot match what validators retrieve, so the round must commit nothing.
+
+**Verified on Bradbury** — rigged contract
+[`0x71C384848EAdb767CC7f59917D26F161b98c29Ce`](https://explorer-bradbury.genlayer.com/address/0x71C384848EAdb767CC7f59917D26F161b98c29Ce):
+
+| Round | Result | Validator votes |
+|---|---|---|
+| 1 | AGREE / FINISHED_WITH_ERROR | TIMEOUT, TIMEOUT, **DISAGREE**, **DISAGREE**, **DISAGREE** |
+| 2 | IDLE / NOT_VOTED | all NOT_VOTED |
+| 3 | AGREE / FINISHED_WITH_ERROR | TIMEOUT, **DISAGREE** ×4 |
+| 4 | AGREE / FINISHED_WITH_ERROR | **DISAGREE** ×4, TIMEOUT |
+| 5 | AGREE / FINISHED_WITH_ERROR | TIMEOUT, **DISAGREE** ×4 |
+
+Read back from chain after all five rounds:
+
+```
+article-1 status : PENDING
+verdict stored   : NONE
+resolve_count    : 0
+```
+
+`node prove_adversarial.mjs` → **5 passed, 0 failed.**
+
+This is the case the steward described: a leader whose claim, source and
+excerpt the other validators never evaluated. It is rejected.
